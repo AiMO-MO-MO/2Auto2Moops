@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Salesforce Card Ordering — Dream-State Requirements (DRAFT)</title></head>
+<body>
+<h1>Laundry Card Ordering in Salesforce — Dream-State Requirements</h1>
+<p><strong>Status:</strong> DRAFT for group review &nbsp;|&nbsp; <strong>Owners:</strong> Matt, Trish &nbsp;|&nbsp; <strong>Requested by:</strong> Taylor Panagakis &nbsp;|&nbsp; <strong>Target:</strong> initial draft to hand to the SF team</p>
+<p><em>Purpose: describe the &ldquo;dream state&rdquo; for how laundry-card orders should work in Salesforce — what a card order is, and every action that must happen off that order to support fulfillment (the MIND / LHC hand-off). This is a requirements brief, not a build spec; the SF team should treat each section as a capability to design against. Screenshots to be added in a later pass.</em></p>
+
+<h2>1. Background &amp; Problem Statement</h2>
+<p>Today, laundry-card orders live entirely in MOOPS (our legacy fulfillment system). There is no representation of a card order in Salesforce. The card workflow in MOOPS is mature and well-understood, but it is manual and tightly coupled to MOOPS&rsquo; data model. As we move the order system of record toward Salesforce, SF needs to be able to (a) capture a card order, (b) create the card &ldquo;part&rdquo; / product that the order references, and (c) trigger the right downstream actions — design approval, purchase orders, and the hand-off to manufacturing/fulfillment — without a human re-keying everything.</p>
+<p>The questions the SF team asked us to answer: <em>Is a card a product type that gets ordered? Is it a product with cases/variants? What actions need to fire off the order to support fulfillment?</em> This document answers those at the requirements level.</p>
+
+<h2>2. What a &ldquo;Card&rdquo; Is (Product Model)</h2>
+<p>A laundry card is a physical, customer-branded loyalty/payment card produced by a card supplier. In the dream state, SF should model it on two levels:</p>
+<ul>
+<li><strong>Card as a Product / Order Type.</strong> &ldquo;Laundry Card&rdquo; should be a first-class product type that can be ordered on its own (a cards-only order) <em>or</em> as a line on a larger equipment/system order. SF needs an explicit order classification for this — equivalent to MOOPS&rsquo; &ldquo;Cards Only&rdquo; order type — because the downstream actions differ from hardware orders.</li>
+<li><strong>Card Design as a distinct record (the &ldquo;part&rdquo;).</strong> Each customer&rsquo;s card has a unique design that becomes a reusable SKU/part. In MOOPS this is a part record named <code>CARD-MD-{SHORTNAME}</code> cloned from a template. SF needs an equivalent: a Card Design / custom Product record that is <strong>created per customer</strong>, carries the artwork and approval state, and can be reordered later without re-creating it.</li>
+</ul>
+<p><strong>Is it a product with cases/variants?</strong> Functionally yes. The same card design is ordered in different quantities and at different price points, and there are a few standing variants the SF team should plan for:</p>
+<table border="1" cellpadding="6" cellspacing="0">
+<tr><th>Variant</th><th>What it is</th><th>Implication for SF</th></tr>
+<tr><td>Custom design (per customer)</td><td>Unique branded card; a new SKU/part is created for the customer</td><td>Triggers part creation + design approval workflow</td></tr>
+<tr><td>Generic card</td><td>Stock, non-branded card (e.g. <code>CARD-MD-GEN01</code>)</td><td>No design workflow; small quantities ride along with the equipment order</td></tr>
+<tr><td>Reprint / reorder</td><td>Re-order of an already-approved existing design</td><td>No new design; goes straight to a purchase order</td></tr>
+<tr><td>Design modify</td><td>Existing design with a change (e.g. address update)</td><td>New proof + approval, but order metadata unchanged</td></tr>
+</table>
+
+<h2>3. Card Order Types &amp; the Action That Each Triggers</h2>
+<p>The single most important thing for the SF team to internalize: <strong>the actions that fire off a card order depend on the design state.</strong> There are four paths, and SF needs to route each one differently.</p>
+<table border="1" cellpadding="6" cellspacing="0">
+<tr><th>#</th><th>Path</th><th>Trigger condition</th><th>Required downstream actions</th></tr>
+<tr><td>A</td><td><strong>New design</strong></td><td>Customer wants a new branded card; no design exists yet</td><td>Create the card part/SKU → generate a design proof → route to customer for approval → on approval, create purchase order to the card supplier → ship</td></tr>
+<tr><td>B</td><td><strong>Reprint / reorder</strong></td><td>Existing approved design, customer wants more</td><td>No part creation, no approval. Create purchase order against the existing design → ship</td></tr>
+<tr><td>C</td><td><strong>Modify</strong></td><td>Existing design with a change (address, logo, etc.)</td><td>Same as new-design approval flow (new proof → approval → PO), but the order&rsquo;s classification/tag does NOT change</td></tr>
+<tr><td>D</td><td><strong>Generic</strong></td><td>Stock cards, typically &lt; 1,000 units</td><td>No design work. Small quantities are bundled onto the related equipment order; no standalone fulfillment</td></tr>
+</table>
+<p><strong>Requirement:</strong> SF should capture the design state as a field on the order (or derive it) and drive the right path automatically — ideally with substring-tolerant matching, because the source values are verbose in practice (&ldquo;Re-print of existing design,&rdquo; &ldquo;new design / modify,&rdquo; etc.).</p>
+
+<h2>4. The Card Order Lifecycle (Dream State)</h2>
+<p>End to end, here is the lifecycle SF should support. Each numbered step is a capability the SF team needs to build or enable.</p>
+
+<h3>4.1 Intake &amp; Classification</h3>
+<p>An incoming request is classified as a card order and routed to the correct path (A–D above). SF should pull: the customer/account, the contact, the card design type, and the card quantity. Where the customer name is missing on the request, it should fall back to the first line of the card description (e.g. &ldquo;Laundry Depot II card&rdquo; → &ldquo;Laundry Depot II&rdquo;).</p>
+
+<h3>4.2 Order Naming / Tagging Convention</h3>
+<p>Card orders follow a strict naming convention so fulfillment can read them at a glance. SF should generate the order name/tag automatically:</p>
+<ul>
+<li>Custom: <code>&lt;QTY&gt; Cards (&lt;Customer&gt;)</code> — e.g. &ldquo;5000 Cards (Pure Wash Laundromats)&rdquo;</li>
+<li>Generic: <code>&lt;QTY&gt; Generic Cards (&lt;Customer&gt;)</code></li>
+</ul>
+
+<h3>4.3 Order Type &amp; Shipment Method</h3>
+<p>For a standalone card order, SF should set the equivalent of: Order Type → <em>Cards Only</em>, and Shipment Method → <em>Drop shipment / Card Supplier</em> (cards ship directly from the supplier, not our warehouse). These should default automatically off the card classification.</p>
+
+<h3>4.4 Card Part / SKU Creation (the &ldquo;card part creation&rdquo; piece)</h3>
+<p>This is the step the SF team specifically called out. For a new design, the system creates a new card SKU. In MOOPS this is a clone of a template part with these attributes — SF needs the equivalent fields on its Card Design / Product record:</p>
+<table border="1" cellpadding="6" cellspacing="0">
+<tr><th>Attribute</th><th>Dream-state value / behavior</th></tr>
+<tr><td>Part / SKU name</td><td>Auto-generated: <code>CARD-MD-{SHORTNAME}</code>. Shortname derived from the customer business name — strip vowels, target ~6 chars, fall back to 2-chars-per-word, then acronym, then truncate. (SF can choose its own convention, but it must be deterministic and human-overridable.)</td></tr>
+<tr><td>Artwork / image</td><td>Starts as a placeholder until the real proof is approved; placeholder state must be queryable (it signals &ldquo;not yet approved&rdquo;)</td></tr>
+<tr><td>Unit cost</td><td>Default card cost (currently $0.175 each) — should be a configurable default, not hard-coded</td></tr>
+<tr><td>Product group / type</td><td>Group = &ldquo;Card,&rdquo; Type = &ldquo;Virtual&rdquo; (no physical inventory held by us; supplier produces on demand)</td></tr>
+<tr><td>Pricing book</td><td>Card pricing list (MOOPS uses <code>USER-CARDS</code>)</td></tr>
+<tr><td>Override</td><td>A human can rename the SKU during creation; all later steps must use the actual saved name, not the generated guess</td></tr>
+</table>
+<p>The new SKU is then added to the order matching the source quantity and price. For reprints/modifies, no new SKU is created — the existing one is referenced.</p>
+
+<h3>4.5 Design Proof &amp; Customer Approval</h3>
+<p>For new designs and modifies, a proof must be produced and sent to the customer for sign-off before anything is purchased. Requirements:</p>
+<ul>
+<li>Generate / attach a design proof and route it to the design team (today this is an email to <code>graphics@mitechisys.com</code>) and to the customer contact.</li>
+<li>Track an explicit <strong>approval state</strong> on the order/design. &ldquo;Placeholder artwork present&rdquo; = not approved. Approval is the gate for the purchase order — <strong>no PO can be created before approval.</strong></li>
+<li>Notifications on state changes (proof sent, approved) so the team isn&rsquo;t polling.</li>
+</ul>
+
+<h3>4.6 Purchase Order to Card Supplier</h3>
+<p>Once a design is approved (new/modify) or immediately (reprint), a purchase order is created against the card supplier. <strong>Important governance note:</strong> in MOOPS today, PO creation is <em>never</em> auto-submitted — a human always reviews and sends. The SF dream state should preserve a human approval gate on the PO even if the rest is automated. The PO flow includes a PO confirmation email to the supplier (with CC handling).</p>
+
+<h3>4.7 Quantity-Based Rules</h3>
+<ul>
+<li><strong>Generic &lt; 1,000:</strong> no standalone order — bundle onto the related equipment/system order.</li>
+<li><strong>Orders &gt; 5,000:</strong> add a separate <strong>shipping line</strong> to the order (large runs incur freight that must be billed).</li>
+</ul>
+
+<h3>4.8 Hand-off to Fulfillment (MIND / LHC)</h3>
+<p>This is the open piece and the main reason the SF team needs detail from us. Once the order is classified, the SKU exists, the design is approved, and the PO is cut, SF must hand the order to the manufacturing/fulfillment process (MIND / LHC). The dream state: a structured, machine-readable hand-off that carries everything fulfillment needs — customer/account, ship-to address + ATTN/phone, design SKU + approved artwork reference, quantity, and the PO. We should align as a group on exactly what payload MIND/LHC expects so SF can produce it directly rather than us re-keying into MOOPS. <em>(Flagged as an open question in §6.)</em></p>
+
+<h2>5. Required Data — Fields SF Should Carry</h2>
+<p>At minimum, a card order in SF should capture and expose:</p>
+<ul>
+<li>Account / end customer (with the missing-name fallback to card description)</li>
+<li>Contact (name, email, phone) for design approval</li>
+<li>Ship-to: company, address, city, state, zip, ATTN name, phone</li>
+<li>Design state (new / reprint / modify / generic) and approval state</li>
+<li>Card design SKU + artwork reference (placeholder vs approved)</li>
+<li>Quantity and unit price</li>
+<li>Order type (Cards Only vs line on a system order) and shipment method</li>
+<li>Linked PO + PO state (draft / approved / ordered)</li>
+<li>Linkage to the parent equipment/system order when the cards ride along</li>
+</ul>
+
+<h2>6. Open Questions for the Group</h2>
+<ol>
+<li><strong>MIND / LHC hand-off payload:</strong> what exact fields/format does the manufacturing side expect? This determines the integration contract.</li>
+<li><strong>Card design as Product vs custom object:</strong> should each customer&rsquo;s design be a real SF Product (PriceBookEntry) or a custom Card Design object linked to a generic &ldquo;Laundry Card&rdquo; product? Affects reporting and reorder UX.</li>
+<li><strong>Approval gating:</strong> confirm we keep a human gate on PO submission (recommended — guards real spend).</li>
+<li><strong>Supplier / drop-ship:</strong> single card supplier or multiple? Drives PO routing.</li>
+<li><strong>Source of truth during transition:</strong> while both systems exist, which is authoritative for card orders, and how do we avoid double-fulfillment?</li>
+</ol>
+
+<h2>7. Appendix — MOOPS Term Glossary (for the SF team)</h2>
+<table border="1" cellpadding="6" cellspacing="0">
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>MOOPS</td><td>Legacy order/fulfillment system cards live in today</td></tr>
+<tr><td>CARD-MD-{SHORTNAME}</td><td>A customer&rsquo;s unique card design part/SKU</td></tr>
+<tr><td>CARD-MD-GEN01</td><td>Generic (stock) card</td></tr>
+<tr><td>Cards Only</td><td>Order type for a standalone card order</td></tr>
+<tr><td>Drop shipment / Card Supplier</td><td>Shipment method — ships direct from the card supplier</td></tr>
+<tr><td>Placeholder artwork</td><td>Design not yet approved by the customer</td></tr>
+<tr><td>USER-CARDS</td><td>Card pricing list</td></tr>
+<tr><td>graphics@mitechisys.com</td><td>Design team inbox proofs are sent to today</td></tr>
+</table>
+<p><em>Next steps: review as a group, fill the open questions in §6, then add MOOPS screenshots for each lifecycle step (§4) before handing to the SF team.</em></p>
+</body>
+</html>

@@ -1,0 +1,30 @@
+[
+  {
+    "id": "dip-switch-defect",
+    "match": {"type": "part", "pattern": "CR-11-100"},
+    "severity": "warn",
+    "message": "DIP switch 1-4 defect — use Reader Number Override setting",
+    "added": "2026-04-15"
+  },
+  {
+    "id": "edc-hybrid-broken",
+    "match": {"type": "part", "pattern": "KIT-ALLIANCE-EDC-WASHER"},
+    "severity": "block",
+    "message": "Hybrid EDC washer mapping broken — Oleg investigating",
+    "added": "2026-05-01"
+  },
+  {
+    "id": "wascomat-unsupported",
+    "match": {"type": "model", "pattern": "W184|W244"},
+    "severity": "block",
+    "message": "Wascomat W184/W244 unsupported — no door sensor feedback",
+    "added": "2026-01-01"
+  },
+  {
+    "id": "large-card-shipping",
+    "match": {"type": "qty", "pattern": "CARD-", "threshold": 5000},
+    "severity": "warn",
+    "message": "5000+ cards — add SHIPPING line item to SO",
+    "added": "2026-05-28"
+  }
+]

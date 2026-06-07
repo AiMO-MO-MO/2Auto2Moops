@@ -1,0 +1,25 @@
+# ── Sensitive: the logged-in browser session (MOOPS / Admin / LaundroPortal / SF + Okta
+# cookies). NEVER commit this. ──────────────────────────────────────────────────────────
+chrome_profile/
+
+# Downloaded per-order customer config files (.cfg) -- customer data, regenerated per run
+vac_configs/
+
+# Generated / run artifacts
+run.log
+_efs_snippet.js
+intake_board.html
+intake_plan.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
