@@ -78,6 +78,54 @@ def customer_location_summary(page, cust_id: str) -> str:
     return summary
 
 
+def read_portal_location_index(page: Page, cust_id: str) -> list:
+    """Read the LaundroPortal location index table for a customer.
+
+    Returns rows with location_id, address, and description/name. This is much
+    cheaper than opening every LocationPanel page and is enough for SO config
+    linking, which only needs the location id that matches the SOR address.
+    """
+    rows = []
+    if not login_to_portal(page, cust_id):
+        return rows
+    try:
+        rows = page.evaluate(r"""() => {
+            const out = [];
+            for (const tr of document.querySelectorAll('tr')) {
+                const cells = [...tr.querySelectorAll('td')].map(td =>
+                    (td.innerText || '').replace(/\s+/g, ' ').trim()
+                );
+                const joined = cells.join(' ');
+                const m = joined.match(/\b(\d{7})\b/);
+                if (!m) continue;
+                const locId = m[1];
+                let address = '';
+                let description = '';
+                for (const c of cells) {
+                    if (!address && /\d+\s+.+,\s*[^,]+,\s*[A-Z]{2,}/i.test(c)) address = c;
+                    if (!description && /Clean Rite|Laundromax|Laundry|Laundromat|Center/i.test(c)) {
+                        description = c;
+                    }
+                }
+                if (!address) {
+                    const am = joined.match(/(\d+\s+[^|]+?,\s*[^|]+?,\s*[A-Z]{2,}(?:\b|$))/i);
+                    if (am) address = am[1].trim();
+                }
+                if (locId && address) out.push({location_id: locId, address, description});
+            }
+            const seen = new Set();
+            return out.filter(r => {
+                if (seen.has(r.location_id)) return false;
+                seen.add(r.location_id);
+                return true;
+            });
+        }""")
+    except Exception as e:
+        print(f"[portal] location index lookup failed for {cust_id}: {e}")
+    print(f"[READ] Portal location index {cust_id}: {len(rows)} rows")
+    return rows
+
+
 def current_portal_customer(page):
     """The Customer ID the LaundroPortal Support View is currently scoped to (the
     sidebar shows 'Customer ID: 0xxxx'). Returns '' if not found. Use this to GUARD
@@ -92,6 +140,40 @@ def current_portal_customer(page):
 
 
 # ── Admin Portal ────────────────────────────────────────────
+
+
+def read_admin_contact(page: Page, cust_id: str) -> dict:
+    """Read only primary contact fields from Admin Portal customer page."""
+    url = f"{ADMIN_TOOLS}/customers/{cust_id}"
+    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+    try:
+        page.wait_for_function(
+            "() => document.body && document.body.innerText.includes('Primary Contact')",
+            timeout=8000,
+        )
+    except Exception:
+        page.wait_for_timeout(1000)
+    data = page.evaluate(r"""() => {
+        const read = (labelText) => {
+            for (const l of document.querySelectorAll('label')) {
+                if ((l.textContent || '').trim() === labelText) {
+                    const group = l.closest('.form-group, div') || l.parentElement;
+                    const inp = group && group.querySelector('input, textarea, select');
+                    if (!inp) return '';
+                    return (inp.value || inp.textContent || '').trim();
+                }
+            }
+            return '';
+        };
+        return {
+            contact_name: read('Primary Contact Name'),
+            contact_email: read('Primary Contact Email'),
+            contact_phone: read('Primary Contact Phone Number')
+        };
+    }""")
+    print(f"[READ] Admin contact {cust_id}: "
+          f"{data.get('contact_name') or '(blank)'} / {data.get('contact_email') or '(blank)'}")
+    return data
 
 
 def read_admin_portal(page: Page, cust_id: str) -> dict:
@@ -110,10 +192,21 @@ def read_admin_portal(page: Page, cust_id: str) -> dict:
     page.goto(url, wait_until="domcontentloaded", timeout=15000)
     time.sleep(2)
 
-    # Verify we landed on the right page
-    title = page.locator("h1").first.text_content(timeout=3000) or ""
-    if cust_id not in title:
-        print(f"[WARNING] Admin Portal page title doesn't match: {title}")
+    # Verify we landed on the right page. Admin Portal can render slowly or without
+    # the expected h1 during redirects, so fall back to the body text before giving up.
+    title = ""
+    body = ""
+    try:
+        title = page.locator("h1").first.text_content(timeout=8000) or ""
+    except Exception:
+        pass
+    try:
+        body = page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        body = ""
+    if cust_id not in title and cust_id not in body:
+        print(f"[WARNING] Admin Portal customer {cust_id} not confirmed "
+              f"(title={title or '(no h1)'}, url={page.url}).")
         return {}
 
     data = page.evaluate(r"""() => {

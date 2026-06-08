@@ -26,6 +26,7 @@ Quick reference:
 import argparse
 import os
 import sys
+import time
 
 # Prevent stale .pyc bytecode cache (OneDrive sync issue)
 sys.dont_write_bytecode = True
@@ -64,6 +65,7 @@ from core.moops import (
 from core.schedule import print_schedule
 from playbooks import first_touch, parts_order, cards_order, final_touch, intake, salesforce
 from core import provisioning, portal, dedup
+from core.order_plan import build_system_rerun_plan, classify_card_type
 
 
 # ---------------------------------------------------------------------------
@@ -186,23 +188,13 @@ class _QuietWriter:
 
 
 def _card_type(design: str) -> str:
-    """Classify the SOR Card Design Type field into one of four actions.
-    The SOR dropdown gives us the value directly -- no substring guessing needed.
-      'New design' / 'New'            -> 'new'     (clone + design email)
-      'Modify' / 'Modify existing...' -> 'modify'  (version-bump clone + design email)
-      'Reprint' / 'Existing' / ...    -> 'reprint' (PO workflow)
-      anything else / empty           -> 'none'
-    """
-    d = (design or "").strip().lower()
-    if not d:
-        return "none"
-    if d.startswith("new"):
-        return "new"
-    if d.startswith("modify"):
-        return "modify"
-    if d.startswith("reprint") or d.startswith("re-print") or d == "existing" or d.startswith("reorder"):
-        return "reprint"
-    return "none"
+    """Backward-compatible wrapper for older imports from run.py."""
+    return classify_card_type(design)
+
+
+def _existing_card_blocks_card_clone(card_type: str) -> bool:
+    """Only new-design orders treat an existing CARD-MD row as a duplicate guard."""
+    return card_type == "new"
 
 
 # Friendly shorthand.  Grammar:  <type> [touch] <id>
@@ -339,6 +331,10 @@ def _expand_verb(argv):
             print("[usage]  python run.py read <id>")
             raise SystemExit(2)
         return [argv[0], "--so-id", rest[0]] + rest[1:]
+    if verb in ("snapshot", "plan"):  # read-only workflow state + rerun plan
+        if not rest:
+            return _usage("snapshot <id>")
+        return [argv[0], "--so-id", rest[0], "--snapshot"] + rest[1:]
     if verb in ("s", "system"):
         # Main system run = the no-ITF flow (dedup -> tag -> schedule -> customer -> chain).
         # 'final' = pre-ship audit; 'first' = legacy ITF first-touch (kept, not headlined).
@@ -605,9 +601,10 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
     import time as _t
     from core.moops import (read_customer_name, read_sor_data, generate_card_shortname,
                             clone_temp_card, action_add_card_to_so, save_so, open_card_design_email,
-                            read_products, create_card_po, open_po_email)
+                            read_products, read_card_end_customer, create_card_po, open_po_email)
     navigate_to_so(page, so_id)
     cust_name = read_customer_name(page)
+    products = read_products(page)
     if sor is None:
         sor = read_sor_data(page)
     design = (sor.get("card_design_type", "") or "").strip()
@@ -620,45 +617,56 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
         return "none"
 
     if new_design:
-        # If a CARD-MD-* is already on the SO, the card was made on a prior touch -- do NOT
-        # clone a duplicate. (The clone + design email is task 3, already done last time.)
-        for p in read_products(page):
-            if p["part_number"].upper().startswith("CARD-MD-"):
-                print(f"\n[CARDS] {p['part_number']} already on the SO -- card was made on a prior "
-                      "touch; not cloning a new one. (Card tasks left as previously set.)")
-                return "exists"
+        # New design duplicate guard only. Modify orders often include the existing CARD-MD
+        # as the source card; task state decides whether to run the modify workflow.
+        if _existing_card_blocks_card_clone(ct):
+            for p in products:
+                if p["part_number"].upper().startswith("CARD-MD-"):
+                    print(f"\n[CARDS] {p['part_number']} already on the SO -- card was made on a prior "
+                          "touch; not cloning a new one. (Card tasks left as previously set.)")
+                    return "exists"
         c_name = sor.get("contact_name", "")
         c_email = sor.get("contact_email", "")
         if cust_id and (not c_name or not c_email):
             try:
-                from core.portal import read_admin_portal
-                admin = read_admin_portal(page, cust_id)
+                from core.portal import read_admin_contact
+                admin = read_admin_contact(page, cust_id)
                 c_name = c_name or admin.get("contact_name", "")
                 c_email = c_email or admin.get("contact_email", "")
-                print(f"[CARDS] Contact from Admin record: {c_name} / {c_email}")
             except Exception as e:
                 print(f"[CARDS] Could not read Admin contact ({e})")
         # Shortname: caller override -> modify version-bump -> auto-generate
         if shortname and shortname != "auto":
             pass  # use provided
         elif ct == "modify":
-            existing_card = next((p["part_number"] for p in read_products(page)
-                                  if p["part_number"].upper().startswith("CARD-MD-")), "")
+            existing_card_row = next((p for p in products
+                                      if p["part_number"].upper().startswith("CARD-MD-")), {})
+            existing_card = existing_card_row.get("part_number", "")
             base = existing_card.upper().replace("CARD-MD-", "", 1) if existing_card else ""
             if base:
                 stem = base.rstrip("0123456789")
                 num = base[len(stem):]
                 shortname = f"{stem}{(int(num) + 1) if num else 2}"
                 print(f"[CARDS] Modify -> bumping {existing_card} to CARD-MD-{shortname}")
+                if not cust_id:
+                    owner = read_card_end_customer(page, existing_card, existing_card_row.get("href", ""))
+                    cust_id = owner.get("id", "")
+                    if cust_id:
+                        print(f"[CARDS] Modify owner inherited from {existing_card}: {cust_id}")
             else:
                 shortname = generate_card_shortname(cust_name)
         else:
             shortname = generate_card_shortname(cust_name)
         print(f"\n--- Cards ({ct}): CARD-MD-{shortname}, owner {cust_id} ---")
         card_part = clone_temp_card(page, shortname, end_customer_id=cust_id)
+        expected_part = f"CARD-MD-{shortname.upper()}"
+        if ct == "modify" and card_part != expected_part:
+            print(f"[CARDS] Expected {expected_part} after clone, got {card_part}.")
+            print("[CARDS] Stopping before adding/deleting cards; verify the cloned card manually.")
+            return "none"
         navigate_to_so(page, so_id)
         action_add_card_to_so(page, card_part)
-        save_so(page, accept_sor=False)
+        save_so(page, accept_sor=False, clear_customer_location_blocker=False)
         open_card_design_email(page, card_part, contact_name=c_name, contact_email=c_email)
         try:
             input("\n[CHAIN] Review and send the card design email, then press Enter.")
@@ -672,8 +680,12 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
         # PO creation is never automated). This is task 5; tasks 3/4 are N/A for a reprint.
         print(f"\n--- Cards (reprint of existing design) ---")
         card_part = ""
-        for p in read_products(page):
+        for p in products:
             if p["part_number"].upper().startswith("CARD-MD-"):
+                if p.get("has_po"):
+                    print(f"[CARDS] {p['part_number']} already has PO "
+                          f"{p.get('po_link') or ''} -- skip card workflow.")
+                    return "exists"
                 card_part = p["part_number"]
                 break
         if not card_part:
@@ -719,9 +731,9 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
 
 def _post_first_touch(page, so_id, res, no_itf):
     """After a no-ITF first-touch, run the full guided provisioning chain
-    (location -> stripe -> user -> intro -> cards). The VAC configuration FILE (task 9)
-    is a separate manual step -- not generated here -- and is the piece that waits on the
-    card artwork for new-design orders; everything else (location/stripe/user) is done."""
+    (customer setup -> location -> payment -> cards -> SO link/config -> final user/intro).
+    VAC config files (task 9) are generated inside the chain after End Customer + location
+    are linked on the SO."""
     cid = res.get("cust_id") if isinstance(res, dict) else res
     existing = res.get("existing", False) if isinstance(res, dict) else False
     verify_only = res.get("verify_only", False) if isinstance(res, dict) else False
@@ -771,14 +783,302 @@ def _print_dedup_summary(res):
 
 
 def _do_system(page, so_id, assembly_week=None, dedup_test=True):
-    """`system <id>` -- ONE idempotent run for first AND second touch. Always runs first_touch
-    (which itself check-or-skips tag/schedule and skips parts when hardware is already verified)
-    + the task-driven provisioning chain (which runs only To-Do tasks). Customer resolution
-    happens in first_touch -- it CREATES the customer if one isn't linked yet (a second touch on
-    an unresolved order still needs that). No separate second-touch path."""
+    """`system <id>` -- one idempotent, snapshot-driven system reconciler."""
+    plan = _do_snapshot(page, so_id)
+    if not plan.get("actionable"):
+        print("\n[SYSTEM] Snapshot found no automated MOOPS/Admin/Portal work to run.")
+        print("[SYSTEM] Stopping before any write/provisioning actions. No save attempted.")
+        return
+    if plan.get("hard_blocked"):
+        print("\n[SYSTEM] Snapshot found actionable work, but also hard blockers:")
+        for line in plan["hard_blocked"]:
+            print(f"  - {line}")
+        print("[SYSTEM] Stopping before write/provisioning actions so it does not run blocked steps.")
+        print("[SYSTEM] Use targeted commands or fix the missing inputs, then re-run snapshot/system.")
+        return
+
+    if plan.get("effective_customer_id"):
+        snap = plan.get("_snapshot", {})
+        end_customer = snap.get("end_customer", {})
+        cust_id = plan.get("effective_customer_id", "")
+        if _can_run_chain_from_snapshot(plan):
+            print("\n[SYSTEM] Snapshot found chain-only work; skipping setup reread.")
+        else:
+            print("\n[SYSTEM] Existing customer identified; running snapshot-driven setup.")
+            print("[SYSTEM] This avoids re-reading SOR and avoids clearing/recreating customer/location state.")
+        pre_done = _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=assembly_week)
+        print("[SYSTEM] Continuing directly with provisioning/config chain.")
+        result = _do_provision_chain(
+            page,
+            so_id,
+            cust_id,
+            existing=True,
+            verify_only=False,
+            ref_location_id=end_customer.get("location_id", ""),
+            sor=snap.get("sor_data", {}),
+            pre_done=pre_done,
+            force_config=bool(plan.get("force_config")),
+        )
+        _print_system_write_summary(result)
+        return
+
+    print("\n[SYSTEM] Snapshot found new-customer setup work; continuing with legacy customer-creation flow.")
     res = first_touch.run(page, so_id, assembly_week=assembly_week,
                           no_itf=True, dedup_test=dedup_test)
     _post_first_touch(page, so_id, res, True)
+
+
+def _print_system_write_summary(result):
+    """Print what this system command actually wrote, separate from snapshot state."""
+    if not isinstance(result, dict):
+        return
+    actions = result.get("actions", [])
+    print("\n--- System Write Summary ---")
+    if actions:
+        for action in actions:
+            print(f"DID:  {action}")
+    else:
+        print("DID:  no write actions in the provisioning chain")
+
+
+def _can_run_chain_from_snapshot(plan):
+    """True when snapshot reads are enough and setup would only repeat work."""
+    if not plan.get("effective_customer_id"):
+        return False
+    setup_prefixes = (
+        "Tag missing",
+        "Assembly week missing",
+        "Task 1 ",
+        "Route task checklist",
+    )
+    for action in plan.get("actionable", []):
+        if action.startswith(setup_prefixes):
+            return False
+    return True
+
+
+def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=None):
+    """Run setup work that does not require customer creation, using snapshot reads."""
+    snap = plan.get("_snapshot", {})
+    so_data = snap.get("so_data", {}) or {}
+    sor_data = snap.get("sor_data", {}) or {}
+    tasks = snap.get("tasks", {}) or {}
+    done = {}
+    changed = False
+
+    needs_tag = not (so_data.get("tag") or "").strip()
+    needs_week = not (so_data.get("assembly_week") or "").strip()
+    task1_open = tasks.get(1, {}).get("status") != "Completed"
+
+    if not (needs_tag or needs_week or task1_open):
+        return done
+
+    print("\n" + "=" * 60)
+    print(f"  EXISTING-CUSTOMER SETUP -- SO-{so_id}")
+    print("=" * 60)
+    navigate_to_so(page, so_id)
+
+    if needs_tag:
+        print("\n--- Setup: Set tag ---")
+        tag_value = build_tag(so_data.get("products", []), so_data.get("customer_name", ""))
+        print(f"Tag: {tag_value}")
+        action_set_tag(page, tag_value)
+        changed = True
+    else:
+        print(f"\n--- Setup: Tag already set ({so_data.get('tag')}) -- skip ---")
+
+    if needs_week:
+        print("\n--- Setup: Set assembly week ---")
+        chosen_week = assembly_week
+        chosen_label = assembly_week
+        pick_reason = "Manual override via --assembly-week" if assembly_week else ""
+        if not chosen_week:
+            from core.schedule import calculate_order_weight, pick_assembly_week, planned_week_for_sor
+            sor_id = ""
+            m = _re.search(r"/order-requests/(\d+)", sor_data.get("sor_url", ""))
+            if m:
+                sor_id = m.group(1)
+            planned = planned_week_for_sor(sor_id)
+            if planned:
+                chosen_week = planned
+                chosen_label = planned
+                pick_reason = f"From intake plan (SOR-{sor_id}) -- schedule not re-read"
+            else:
+                order_weight = calculate_order_weight(so_data.get("products", []))
+                schedule = read_schedule_capacity(page)
+                print_schedule(schedule)
+                chosen_week, chosen_label, pick_reason = pick_assembly_week(
+                    schedule,
+                    required_date=sor_data.get("required_date", ""),
+                    is_expedited=bool(sor_data.get("is_expedited")),
+                    order_weight=order_weight,
+                )
+        if chosen_week:
+            print(f">> PICKED: {chosen_label} ({chosen_week})")
+            print(f"   Reason: {pick_reason}")
+            action_set_assembly_week(page, chosen_week)
+            changed = True
+        else:
+            print(f">> COULD NOT AUTO-PICK ASSEMBLY WEEK: {pick_reason or 'no week returned'}")
+    else:
+        print(f"\n--- Setup: Assembly week already set ({so_data.get('assembly_week')}) -- skip ---")
+
+    if task1_open:
+        print("\n--- Setup: Add missing hardware companion parts ---")
+        added = action_add_required_parts(
+            page,
+            processor_type=sor_data.get("processor_type", ""),
+            is_route=bool(so_data.get("is_route")),
+        ) or []
+        if added:
+            changed = True
+        done[1] = "Completed"
+    else:
+        print("\n--- Setup: Hardware verified already Completed -- skip ---")
+
+    if plan.get("effective_customer_id"):
+        done[2] = "Completed"
+    if _card_type(sor_data.get("card_design_type", "")) == "none":
+        for n in (3, 4, 5):
+            if tasks.get(n, {}).get("status") == "To Do":
+                done[n] = "N/A"
+
+    if changed:
+        print("\n--- Setup: Save SO ---")
+        save_so(page, accept_sor=False, clear_customer_location_blocker=False)
+    else:
+        print("\n--- Setup: No SO field/part changes to save ---")
+
+    return done
+
+
+def _apply_config_attachment_signal(plan, so_data, tasks, end_customer, attached_configs):
+    """Make config actionable when the SO is linked but expected .cfg files are missing."""
+    expected_config_count = sum(
+        int(p.get("qty", 0) or 0)
+        for p in so_data.get("products", [])
+        if (p.get("part_number", "") or "").upper().startswith("VAC")
+    )
+    attached_configs = attached_configs or []
+    plan["config_files"] = {
+        "expected": expected_config_count,
+        "attached": len(attached_configs),
+        "names": attached_configs,
+    }
+    customer_id = end_customer.get("id") or plan.get("effective_customer_id")
+    config_short = (
+        expected_config_count
+        and customer_id
+        and len(attached_configs) < expected_config_count
+    )
+    if config_short:
+        plan["force_config"] = True
+        plan["skip"] = [
+            line for line in plan["skip"]
+            if line not in (
+                "Task 9 Completed -> skip VAC config files",
+                "Task 9 Completed -> skip SO End Customer/config workflow",
+            )
+        ]
+        if not any("Task 9" in line and "config" in line.lower() for line in plan["actionable"]):
+            plan["actionable"].append(
+                "Task 9 config workflow needed -> link SO End Customer/location if needed, then upload VAC config files"
+            )
+        if not any(item.get("step") == "Task 9 config" for item in plan["inputs"]):
+            plan["inputs"].append({
+                "step": "Task 9 config",
+                "ready": True,
+                "detail": f"customer identified; attached_cfg={len(attached_configs)}/{expected_config_count}",
+            })
+    return plan
+
+
+def _do_snapshot(page, so_id):
+    """Read-only state summary for deciding what an optimized rerun should do.
+
+    This intentionally does not call any action/fill/save functions. It is the
+    safety bridge toward a checklist-driven reconciler.
+    """
+    from core.moops import read_config_file_resources, read_so_end_customer
+
+    print("\n" + "=" * 60)
+    print(f"  SNAPSHOT / PLAN -- SO-{so_id} (READ ONLY)")
+    print("=" * 60)
+
+    metrics = []
+
+    def timed_read(label, fn):
+        t0 = time.perf_counter()
+        value = fn()
+        metrics.append((label, time.perf_counter() - t0))
+        return value
+
+    snapshot_start = time.perf_counter()
+    so_data = timed_read("read_so", lambda: first_touch.read_so(page, so_id))
+    sor_data = timed_read("read_sor_data", lambda: read_sor_data(page))
+    tasks = timed_read("read_task_states", lambda: read_task_states(page))
+    end_customer = timed_read("task9_read_so_end_customer", lambda: read_so_end_customer(page))
+    plan_start = time.perf_counter()
+
+    plan = build_system_rerun_plan(so_data, sor_data, tasks, end_customer)
+    attached_configs = timed_read("task9_read_config_files", lambda: read_config_file_resources(page))
+    plan = _apply_config_attachment_signal(plan, so_data, tasks, end_customer, attached_configs)
+    plan["_snapshot"] = {
+        "so_data": so_data,
+        "sor_data": sor_data,
+        "tasks": tasks,
+        "end_customer": end_customer,
+    }
+    metrics.append(("build_plan", time.perf_counter() - plan_start))
+    card_type = plan["card_type"]
+    is_route = plan["is_route"]
+
+    print("\n--- SOR Signals ---")
+    print(f"Processor: {sor_data.get('processor_type', '') or '(Stripe default)'}")
+    req = sor_data.get("required_date", "")
+    if req:
+        exp = " EXPEDITED" if sor_data.get("is_expedited") else ""
+        print(f"Required date: {req}{exp}")
+    print(f"Card design: {sor_data.get('card_design_type', '') or '(none)'} -> {card_type}")
+    print(f"Order type: {'Route' if is_route else 'System'}")
+    print(f"Contact: {sor_data.get('contact_name', '') or '(blank)'} / "
+          f"{sor_data.get('contact_email', '') or '(blank)'}")
+    print(f"Effective Customer: {plan.get('effective_customer_id') or '(not found)'} "
+          f"{plan.get('effective_customer_name') or ''}".rstrip())
+
+    print("\n--- Task States ---")
+    for n in sorted(tasks):
+        t = tasks[n]
+        print(f"Task {n:2d}: {t.get('status', ''):10s} {t.get('label', '')}")
+
+    print("\n--- Optimized Rerun Plan ---")
+    for line in plan["skip"]:
+        print(f"SKIP: {line}")
+    for line in plan["actionable"]:
+        print(f"DO:   {line}")
+    for line in plan["blocked"]:
+        print(f"WAIT: {line}")
+    if plan["blocked"] and plan["actionable"] and not plan.get("hard_blocked"):
+        print("NOTE: WAIT items above are same-run dependencies; system can continue after the DO steps.")
+    if not plan["actionable"]:
+        print("RESULT: no automated MOOPS/Admin/Portal actions should run.")
+    if plan.get("inputs"):
+        print("\n--- Required Inputs ---")
+        for item in plan["inputs"]:
+            detail = item.get("detail", "")
+            same_run_wait = (
+                not item.get("ready")
+                and "waiting on task 8 location" in detail.lower()
+                and not plan.get("hard_blocked")
+            )
+            status = "READY TO RUN" if item.get("ready") else "WAITING SAME RUN" if same_run_wait else "BLOCKED"
+            print(f"{status}: {item.get('step')} - {item.get('detail')}")
+    metrics.append(("snapshot_total", time.perf_counter() - snapshot_start))
+    print("\n--- Timing ---")
+    for label, elapsed in metrics:
+        print(f"{label}: {elapsed:.1f}s")
+    print("=" * 60)
+    return plan
 
 
 def _do_config_files(page, so_id):
@@ -786,20 +1086,122 @@ def _do_config_files(page, so_id):
     SO's File Resources. Saved under vac_configs/SO<id>/ next to run.py. Returns True if any
     file was uploaded."""
     import os
-    from core.moops import download_vac_configs, upload_files_to_so
+    from pathlib import Path
+    from core.moops import download_vac_configs, read_config_file_resources, upload_files_to_so
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vac_configs", f"SO{so_id}")
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    for old in list(out_path.glob("*.cfg")) + list(out_path.glob("_tmp.cfg")):
+        try:
+            old.unlink()
+        except Exception as e:
+            print(f"[CONFIG] Could not remove stale local config {old.name} ({e})")
     navigate_to_so(page, so_id)
+    before = read_config_file_resources(page)
+    print(f"[CONFIG] File Resources before config run: {len(before)} .cfg file(s)")
+    print("[CONFIG] Downloading fresh config files from the current SO VAC rows.")
     paths = download_vac_configs(page, so_id, out_dir)
     if not paths:
         return False
-    return upload_files_to_so(page, paths)
+    uploaded = upload_files_to_so(page, paths)
+    after = read_config_file_resources(page)
+    print(f"[CONFIG] File Resources after config run: {len(after)} .cfg file(s)")
+    return uploaded
+
+
+def _addr_norm(value):
+    return _re.sub(r'[^a-z0-9]+', '', (value or "").lower())
+
+
+def _location_match_score(sor_addr, portal_loc):
+    """Pure-ish score for matching a SOR address to a Portal location read."""
+    target = _parse_address(sor_addr or "")
+    portal_addr = portal_loc.get("address", "")
+    parsed_portal = _parse_address(portal_addr)
+    street = _addr_norm(target.get("street", ""))
+    city = _addr_norm(target.get("city", ""))
+    state = (target.get("state", "") or "").upper()
+    zip_code = target.get("zip", "")
+
+    p_street = _addr_norm(parsed_portal.get("street", "") or portal_addr)
+    p_city = _addr_norm(portal_loc.get("city", "") or parsed_portal.get("city", ""))
+    p_state = (portal_loc.get("state", "") or parsed_portal.get("state", "")).upper()
+    p_zip = portal_loc.get("zip", "") or parsed_portal.get("zip", "")
+
+    score = 0
+    if zip_code and p_zip and zip_code == p_zip:
+        score += 2
+    if street and p_street and (street in p_street or p_street in street):
+        score += 5
+    if city and p_city and city == p_city:
+        score += 1
+    if state and p_state and state == p_state:
+        score += 1
+    return score
+
+
+def _resolve_existing_location_id(page, cust_id, sor):
+    """Find a previously-created Portal location ID for this SOR address.
+
+    Used when task 8 is already Completed but the SO End Customer/location was not
+    linked. Read-only unless it prompts the operator for a location id fallback.
+    """
+    loc_addr = (sor or {}).get("location_address", "")
+    if not cust_id or not loc_addr:
+        return ""
+    try:
+        from core import portal as _portal
+        rows = _portal.read_portal_location_index(page, cust_id)
+        matches = []
+        for row in rows:
+            data = {"address": row.get("address", ""), "city": "", "state": "", "zip": ""}
+            score = _location_match_score(loc_addr, data)
+            if score >= 6:
+                matches.append((score, row.get("location_id", ""), row))
+        if len(matches) == 1:
+            score, loc_id, data = matches[0]
+            print(f"[CHAIN] Matched existing Portal location {loc_id} "
+                  f"({data.get('address', '')}) score={score}.")
+            return loc_id
+        if len(matches) > 1:
+            print("[CHAIN] Multiple Portal locations matched the SOR address; not guessing:")
+            for score, loc_id, data in matches:
+                print(f"  {loc_id}: {data.get('address', '')} score={score}")
+        else:
+            print("[CHAIN] Could not match a Portal location to the SOR address.")
+    except Exception as e:
+        print(f"[CHAIN] Existing location lookup failed ({e}).")
+        print(f"[CHAIN] Make sure LaundroPortal is signed in and can open customer {cust_id}.")
+    try:
+        return input("[CHAIN] Paste the existing Location ID to link on the SO "
+                     "(blank = skip config this run): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[CHAIN] No location id provided.")
+        return ""
+
+
+def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_config=False,
+                                  card_result="none"):
+    """Checklist delta for existing/replacement chain runs."""
+    done = {}
+    if did_stripe:
+        done[7] = "Completed"
+    if did_location:
+        done[8] = "Completed"
+    if did_config:
+        done[9] = "Completed"
+    if card_result == "new":
+        done[3], done[4], done[5] = "Completed", "To Do", "To Do"
+    elif card_result == "reprint":
+        done[3], done[4], done[5] = "N/A", "N/A", "Completed"
+    return done
 
 
 def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
-                        ref_location_id="", sor=None):
+                        ref_location_id="", sor=None, pre_done=None, force_config=False):
     """Guided no-ITF provisioning chain -- ONE flow, three flavors (reuses every step):
-      NEW      : API user + Stripe-feature fill -> location(0100001) -> stripe -> user -> intro -> cards
-      EXISTING : verify cust page (check only) -> location(next 01/02) -> stripe -> [skip user/intro] -> cards
+      NEW      : API user + Stripe-feature fill -> location(0100001) -> stripe -> SO link/config -> user/intro
+      EXISTING : verify cust page (check only) -> location(next 01/02) -> stripe -> SO link/config -> [skip user/intro]
       VERIFY   : replacement/exchange -- customer + location already exist. Check only,
                  add NOTHING (no location, no Stripe init, no user/intro); just link the
                  existing End Customer on the SO + set tasks.
@@ -860,20 +1262,21 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     did_stripe = False
     did_user_intro = False
     did_config = False
+    verified_existing_location = False
+    pre_done = dict(pre_done or {})
+    write_actions = []
 
     # Customer page (API user + Stripe feature) -- prereq for payment(7)/user(10).
     if not verify_only and ({7, 10} & todo):
         filled = False
         if existing:
-            # CHECK first -- existing != already-provisioned. If the API user (POS) or the
-            # Stripe reporting feature is missing, FILL it (same human-save gate as NEW);
-            # don't just flag it. None = page unreadable -> leave it to manual.
+            # Existing customers are live accounts. Check only; do not change customer-level
+            # Admin settings from a system rerun just because task 7/10 is still open.
             print("\n--- Customer page (check) ---")
             chk = provisioning.check_customer_setup(page, cust_id)
             if chk is not None and (not chk.get("pos") or not chk.get("stripe")):
-                print("--- Gap found -> filling API user (POS) + Stripe feature (Admin) ---")
-                provisioning.fill_api_user(page, cust_id)
-                filled = True
+                print("[CHAIN] Customer setup check found missing POS/Stripe feature flags.")
+                print("[CHAIN] Not changing existing customer settings in this run; use targeted apiuser if needed.")
         else:
             print("\n--- API user (POS) + Stripe feature (Admin) ---")
             provisioning.fill_api_user(page, cust_id)
@@ -895,57 +1298,59 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     # Location (task 8). Skip if done or replacement (location already exists).
     if 8 in todo and not verify_only:
         print("\n--- Add Location (LaundroPortal) ---")
-        # New customer -> 0100001 (first, card-capable). Existing -> next id in the right
-        # series, driven by the SOR's Access Sharing: Yes => 01 (group on the existing 01),
-        # No => 02 (start a new grouping). Default to shared (01) only if Access Sharing
-        # couldn't be read.
         if existing:
-            acc = (sor.get("access_sharing", "") if sor else "").strip().lower()
-            shared = False if acc.startswith("no") else True
-            if acc:
-                print(f"[CHAIN] Access Sharing = {acc!r} -> {'01 (grouped)' if shared else '02 (new group)'} series")
+            print("[CHAIN] Existing customer: checking Portal location index before creating anything.")
+            matched_loc_id = _resolve_existing_location_id(page, cust_id, sor)
+            if matched_loc_id:
+                loc_id = matched_loc_id
+                verified_existing_location = True
+                print(f"[CHAIN] Existing location {loc_id} will be linked on the SO; no new location created.")
+                write_actions.append(f"verified existing Portal location {loc_id}")
             else:
-                print("[CHAIN] Access Sharing not read -- defaulting to 01 (grouped) series; VERIFY.")
-            loc_id = provisioning.next_location_id(page, cust_id, shared=shared)
+                print("[CHAIN] No existing location selected.")
+                try:
+                    create_ok = input("[CHAIN] Type CREATE to make a new Portal location, "
+                                      "or press Enter to stop this run: ").strip().upper()
+                except (EOFError, KeyboardInterrupt):
+                    create_ok = ""
+                if create_ok != "CREATE":
+                    print("[CHAIN] Stopping before location creation. No new Portal location made.")
+                    return
+                print("[CHAIN] CREATE confirmed -- continuing to create a new Portal location.")
+                acc = (sor.get("access_sharing", "") if sor else "").strip().lower()
+                shared = False if acc.startswith("no") else True
+                if acc:
+                    print(f"[CHAIN] Access Sharing = {acc!r} -> {'01 (grouped)' if shared else '02 (new group)'} series")
+                else:
+                    print("[CHAIN] Access Sharing not read -- defaulting to 01 (grouped) series; VERIFY.")
+                loc_id = provisioning.next_location_id(page, cust_id, shared=shared)
         else:
             loc_id = "0100001"
-        _do_addloc(page, so_id, cust_id, location_id=loc_id, sor=sor, seats=vac_seats)
-        if not _pause("\n[CHAIN] Save the location, then press Enter (I'll read the Location Key)..."):
-            return
-        for _ in range(12):  # Location_Key lands in the URL after save (maybe on the LP tab)
-            for p in [page] + list(page.context.pages):
-                try:
-                    mm = _re.search(r'Location_Key=(\d+)', p.url or "")
-                except Exception:
-                    mm = None
-                if mm:
-                    loc_key = mm.group(1)
+        if not verified_existing_location:
+            _do_addloc(page, so_id, cust_id, location_id=loc_id, sor=sor, seats=vac_seats)
+            if not _pause("\n[CHAIN] Save the location, then press Enter (I'll read the Location Key)..."):
+                return
+            for _ in range(12):  # Location_Key lands in the URL after save (maybe on the LP tab)
+                for p in [page] + list(page.context.pages):
+                    try:
+                        mm = _re.search(r'Location_Key=(\d+)', p.url or "")
+                    except Exception:
+                        mm = None
+                    if mm:
+                        loc_key = mm.group(1)
+                        break
+                if loc_key:
                     break
+                page.wait_for_timeout(500)
             if loc_key:
-                break
-            page.wait_for_timeout(500)
-        if loc_key:
-            print(f"[CHAIN] Location Key = {loc_key}")
-        else:
-            loc_key = input("[CHAIN] Couldn't read Location Key from any tab -- paste it: ").strip()
-        did_location = bool(loc_key)  # a Location Key only exists once the location is saved
+                print(f"[CHAIN] Location Key = {loc_key}")
+            else:
+                loc_key = input("[CHAIN] Couldn't read Location Key from any tab -- paste it: ").strip()
+            did_location = bool(loc_key)  # a Location Key only exists once the location is saved
+            if did_location:
+                write_actions.append(f"created/saved Portal location {loc_id} (Location_Key {loc_key})")
     else:
         print("\n--- Add Location: skip (task 8 done / replacement) ---")
-
-    # User + intro (task 10) -- BEFORE Stripe, so the portal user exists to be granted
-    # bank/account access in the Stripe step. Skip for existing customers -- they already
-    # have LP users. For a never-provisioned existing customer, run `adduser <so> <cust>`.
-    if 10 in todo and not existing and not verify_only:
-        print("\n--- Add User (LaundroPortal) ---")
-        _do_adduser(page, so_id, cust_id, sor=sor)
-        if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
-                      "then press Enter for the intro email + Stripe..."):
-            return
-        print("\n--- Intro email (Admin) ---")
-        provisioning.send_intro_email(page, cust_id)
-        did_user_intro = True
-    else:
-        print("\n--- User + intro: skip (task 10 done / replacement) ---")
 
     # Stripe (task 7) -- ONLY for Stripe processors. Fortis/EBT orders (KIT-A35) run on
     # Fortis, not a Stripe merchant, so skip Stripe entirely for them. Needs a location key.
@@ -955,6 +1360,9 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         print("\n--- Stripe (LaundroPortal) ---")
         if loc_key:
             did_stripe = bool(provisioning.open_stripe(page, cust_id, loc_key))
+        elif verified_existing_location:
+            print("[CHAIN] Existing location matched, but no Location_Key was opened this run.")
+            print("[CHAIN] Not creating or reinitializing Stripe from task state alone; verify payment with targeted Stripe/payment check.")
         else:
             print(f"[CHAIN] No location key -- run `stripe {cust_id} <key>` after the location is saved.")
     elif is_fortis:
@@ -964,9 +1372,15 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
 
     # Cards (tasks 3/4/5). _do_cards runs the right card lane and reports which: "new"
     # (design email -> task 3), "reprint" (PO sent -> task 5), or "none".
-    if {3, 4, 5} & todo:
+    card_kind = _card_type((sor or {}).get("card_design_type", ""))
+    if ({3, 4, 5} & todo) and card_kind != "none":
         print("\n--- Cards ---")
         card_result = _do_cards(page, so_id, cust_id, sor=sor)
+    elif {3, 4, 5} & todo:
+        print("\n--- Cards: skip (SOR has no actionable card design type) ---")
+        for n in (3, 4, 5):
+            if n in todo:
+                pre_done[n] = "N/A"
     else:
         print("\n--- Cards: skip (card tasks done / N-A) ---")
 
@@ -976,24 +1390,69 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     fc = read_so_end_customer(page)
     if fc.get("id"):
         print(f"\n--- End Customer: already linked ({fc['id']}) -- skip ---")
+    elif not loc_id and cust_id and 8 not in todo:
+        print("\n--- End Customer on SO: locating existing Portal location ---")
+        loc_id = _resolve_existing_location_id(page, cust_id, sor)
+        navigate_to_so(page, so_id)
+        if loc_id:
+            set_so_end_customer(page, cust_id, location_id=loc_id, save=True)
+            fc = read_so_end_customer(page)
+            write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id}")
+        else:
+            print("[CHAIN] No location id available -- skipping SO link/config this run.")
+            print("[CHAIN] Sign in to Admin Portal/LaundroPortal or paste the existing Location ID, "
+                  "then rerun `s {}`.".format(so_id))
+            return
     else:
         print("\n--- End Customer on SO ---")
         set_so_end_customer(page, cust_id, location_id=loc_id, save=True)
         fc = read_so_end_customer(page)  # re-read to confirm it took
+        write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id or '(blank)'}")
+    if verified_existing_location and fc.get("id") and loc_id:
+        did_location = True
+        if 10 in todo:
+            pre_done[10] = "Completed"
 
     # VAC config files (task 9). REQUIRES End Customer + Location linked on the SO --
     # MOOPS uses them to populate CustomerKey and LocationID in the .cfg.
     # Skip and flag if End Customer isn't set yet (e.g. dealer link pending).
-    if 9 in todo:
+    if 9 in todo or force_config:
         if fc.get("id"):
-            print("\n--- VAC config files (task 9) ---")
+            label = "task 9" if 9 in todo else "config recovery"
+            print(f"\n--- VAC config files ({label}) ---")
             did_config = bool(_do_config_files(page, so_id))
+            if did_config:
+                write_actions.append("downloaded fresh VAC config files and uploaded them to File Resources")
+            if not did_config:
+                try:
+                    ans = input("[CHAIN] Config upload was not confirmed automatically. "
+                                "If you verified the config files are attached, type y to mark task 9 complete: ")
+                except (EOFError, KeyboardInterrupt):
+                    ans = ""
+                did_config = ans.strip().lower() in ("y", "yes")
+                if did_config:
+                    write_actions.append("operator confirmed VAC config files are attached")
         else:
             print("\n--- VAC config files (task 9): SKIPPED -- End Customer not set on SO. ---")
             print(f"[FLAG] Link End Customer {cust_id} / location {loc_id or '?'} on the SO first,")
             print(f"       then run `s {so_id}` again (task 9 still To Do -- chain will retry).")
     else:
         print("\n--- Config files: skip (task 9 done / N-A) ---")
+
+    # Admin Portal user + intro email (task 10) -- final customer-facing step.
+    # Skip for existing customers -- they already have LP users. For a never-provisioned
+    # existing customer, run `adduser <so> <cust>` as a targeted command.
+    if 10 in todo and not existing and not verify_only:
+        print("\n--- Add User (LaundroPortal) ---")
+        _do_adduser(page, so_id, cust_id, sor=sor)
+        if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
+                      "then press Enter for the intro email..."):
+            return
+        print("\n--- Intro email (Admin) ---")
+        provisioning.send_intro_email(page, cust_id)
+        did_user_intro = True
+    else:
+        print("\n--- User + intro: skip (task 10 done / existing / replacement) ---")
 
     # Task checklist.
     # NEW customer (first pass) -> set the full baseline map (action_set_system_tasks).
@@ -1015,39 +1474,48 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         if done:
             print(f"  Marking completed workflows: {sorted(done)}")
             set_task_checklist(page, done)
+            write_actions.append(f"updated task checklist {sorted(done)}")
         save_so(page, accept_sor=False)
+        write_actions.append("saved SO after checklist update")
     else:
-        # 1 (hardware verified) + 2 (end-customer info) are done by virtue of processing the
-        # order; the rest are checked off only if the chain completed that workflow this run.
-        done = {1: "Completed", 2: "Completed"}
-        if did_stripe:     done[7] = "Completed"   # payment processing / Stripe configured
-        if did_location:   done[8] = "Completed"   # location added to Portal
-        if did_config:     done[9] = "Completed"   # VAC config files uploaded to File Resources
-        # Existing customers already have a portal user (we verified the customer) -> task 10
-        # is done. (New customers go through action_set_system_tasks, not this branch.)
-        done[10] = "Completed"
+        # Existing/replacement reruns should touch only workflows completed by THIS pass,
+        # plus narrow card-state outcomes. Do not re-write already completed tasks just
+        # because they were prerequisites for this rerun.
+        done = _existing_chain_done_statuses(
+            did_stripe=did_stripe,
+            did_location=did_location,
+            did_config=did_config,
+            card_result=card_result,
+        )
+        done.update(pre_done)
         # Cards decision tree -> task states:
         #   no card        -> 3/4/5 N/A
         #   new design     -> 3 Completed (email), 4 To Do (approval), 5 To Do (PO after)
         #   reprint        -> 3 N/A, 4 N/A (existing design already approved), 5 Completed (PO sent)
-        if card_result == "new":
-            done[3], done[4], done[5] = "Completed", "To Do", "To Do"
-        elif card_result == "reprint":
-            done[3], done[4], done[5] = "N/A", "N/A", "Completed"
-        elif card_result == "exists":
+        if card_result == "exists":
             pass  # card made on a prior touch -- leave 3/4/5 as they were set then
-        else:  # "none" -- no actionable card on the order
-            done[3] = done[4] = done[5] = "N/A"
-        print(f"\n--- Task checklist (checking off completed workflows: {sorted(done)}) ---")
-        navigate_to_so(page, so_id)
-        set_task_checklist(page, done)
-        save_so(page, accept_sor=False)
+        print(f"\n--- Task checklist (checking off completed workflows: {sorted(done) or 'none'}) ---")
+        if done:
+            navigate_to_so(page, so_id)
+            set_task_checklist(page, done)
+            save_so(page, accept_sor=False)
+            write_actions.append(f"updated task checklist {sorted(done)} and saved SO")
+        else:
+            print("[CHAIN] No checklist changes from this pass -- no final SO save.")
 
     print("\n" + "=" * 60)
     print(f"  CHAIN COMPLETE ({flavor}) for {cust_id} -- ran To Do tasks {sorted(todo) or 'none'}.")
     if not existing and not verify_only:
         print(f"  TODO (manual): add {cust_id} to the dealer record.")
+        print("  The SO End Customer search may not show this customer until that dealer link exists.")
     print("=" * 60)
+    return {
+        "actions": write_actions,
+        "done": done if 'done' in locals() else {},
+        "did_config": did_config,
+        "did_location": did_location,
+        "did_stripe": did_stripe,
+    }
 
 
 def _do_custid(page, so_id, cust_id=None):
@@ -1248,6 +1716,8 @@ def _console_exec(page, args):
         _do_provision_chain(page, args.so_id, args.provision)
     elif args.salesforce:
         salesforce.run(page, args.so_id)
+    elif args.snapshot:
+        _do_snapshot(page, args.so_id)
     elif args.first_touch and args.no_itf:
         # `system <id>` -- one idempotent run (auto first vs second touch).
         _do_system(page, args.so_id, assembly_week=args.assembly_week, dedup_test=args.dedup_test)
@@ -1289,11 +1759,12 @@ def _start_console(parser):
     print("  createcust <id> [cust]          custid <so> [cust]     provision <so> <cust>")
     print("  addloc <so> <cust>              adduser <so> <cust>    apiuser <cust>")
     print("  stripe <cust> <key>             intro <cust>           itf <id>")
-    print("  tasks <id>                      settasks <id>          final <id>")
+    print("  tasks <id>                      snapshot <id>          final <id>")
+    print("  settasks <id>")
     print("  card <so> <cust>  (card step only, safe on a system order)")
     print("  r first|final <id>              m <id>  (card-modify)\n")
     print("READ / INSPECT")
-    print("  read <id>   intake   inspect <sor>   createcust <id> [cust] [--preview]")
+    print("  read <id>   plan <id>   intake   inspect <sor>   createcust <id> [cust] [--preview]")
     print("  inspect-form <url>   inspect-lp <cust> <url>   inspect-pp <key>   recopy\n")
     print("  -v <run> for full step output                                   quit | exit")
     pw, context, page = launch_browser()
@@ -1423,6 +1894,8 @@ def main():
                          help="Read and display current task checklist states")
     actions.add_argument("--read-sor", action="store_true",
                          help="Read SOR for processor type, required date, etc.")
+    actions.add_argument("--snapshot", action="store_true",
+                         help="Read-only SO/SOR/tasks snapshot and optimized rerun plan")
     actions.add_argument("--check-schedule", action="store_true",
                          help="Show assembly week capacity")
     actions.add_argument("--clone-card", type=str, nargs="?", const="auto",
@@ -1640,6 +2113,9 @@ def main():
 
         elif args.salesforce:
             salesforce.run(page, args.so_id)
+
+        elif args.snapshot:
+            _do_snapshot(page, args.so_id)
 
         elif args.first_touch and args.no_itf:
             # `system <id>` -- one idempotent run (auto first vs second touch).

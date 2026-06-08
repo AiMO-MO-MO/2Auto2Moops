@@ -15,7 +15,7 @@ from core.moops import (
     read_products,
     read_customer_name,
     read_missing_parts,
-    read_sor_shipping_method,
+    read_sor_data,
     read_shipping_to,
     clean_name,
     save_so,
@@ -273,11 +273,13 @@ def run(page, so_id):
         print(f"  {p['part_number']:30s} qty={p['qty']}")
     print(f"  [{time.time() - t0:.1f}s]")
 
-    # Step 2: Read SOR shipping method
+    # Step 2: Read SOR shipping data
     t0 = time.time()
-    print("\n--- Step 2: Read SOR shipping method ---")
-    sor_shipping = read_sor_shipping_method(page)
-    efs_ship_via = map_sor_to_efs_shipping(sor_shipping)
+    print("\n--- Step 2: Read SOR shipping data ---")
+    sor_data = read_sor_data(page)
+    sor_shipping = sor_data.get("shipping_method", "")
+    sor_comments = sor_data.get("shipping_comments", "")
+    efs_ship_via = map_sor_to_efs_shipping(sor_shipping, sor_comments)
     print(f"SOR shipping: '{sor_shipping}' -> EFS Ship Via: '{efs_ship_via}'")
     print(f"  [{time.time() - t0:.1f}s]")
 

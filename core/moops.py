@@ -163,6 +163,7 @@ def read_products(page: Page) -> list:
             if pn_loc.count() == 0:
                 continue
             part_number = pn_loc.first.inner_text().strip()
+            part_href = pn_loc.first.get_attribute("href") or ""
             qty = 0
             inp_loc = row.locator('input')
             if inp_loc.count() > 0:
@@ -176,7 +177,25 @@ def read_products(page: Page) -> list:
                 desc_loc = row.locator('td.editable-control')
             if desc_loc.count() > 0:
                 desc = desc_loc.first.inner_text().strip()
-            products.append({"part_number": part_number, "qty": qty, "row_id": row_id, "description": desc})
+            po_link = ""
+            po_href = ""
+            try:
+                po = row.locator('a[href*="purchase"], a[href*="po"], a').filter(has_text="PO-").first
+                if po.count() > 0:
+                    po_link = po.inner_text().strip()
+                    po_href = po.get_attribute("href") or ""
+            except Exception:
+                pass
+            products.append({
+                "part_number": part_number,
+                "href": part_href,
+                "qty": qty,
+                "row_id": row_id,
+                "description": desc,
+                "po_link": po_link,
+                "po_href": po_href,
+                "has_po": bool(po_link),
+            })
         except Exception:
             continue
     return products
@@ -420,6 +439,61 @@ def read_so_end_customer(page: Page) -> dict:
     return out
 
 
+def read_card_end_customer(page: Page, card_part_number: str, href: str = "") -> dict:
+    """Read End-Customer ownership from an existing CARD-MD part page."""
+    out = {"id": "", "name": ""}
+    if not card_part_number:
+        return out
+    url = href or f"{MOOPS_BASE}/part?part_number={card_part_number}"
+    if url.startswith("/"):
+        url = f"{MOOPS_BASE}{url}"
+    print(f"[READ] Card owner lookup: {card_part_number}")
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(1500)
+    except Exception as e:
+        print(f"[CARDS] Could not open {card_part_number} for owner lookup ({e})")
+        return out
+
+    candidates = []
+    for sel in (
+        "#validity_portal_customer_search",
+        'input[name*="portal_customer"]',
+        'input[id*="customer"]',
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count():
+                val = (loc.first.input_value(timeout=1500) or "").strip()
+                if val:
+                    candidates.append(val)
+        except Exception:
+            pass
+    if not candidates:
+        try:
+            text = page.locator("body").first.inner_text(timeout=3000)
+            candidates.append(text)
+        except Exception:
+            pass
+
+    for val in candidates:
+        m = re.search(r'(\d{4,6})\s*[-)]\s*([A-Za-z][^\n\r()]*)?', val)
+        if m:
+            out["id"] = m.group(1)
+            out["name"] = (m.group(2) or "").strip(" -")
+            break
+        m = re.search(r'([A-Za-z][^\n\r()]*)\((\d{4,6})\)', val)
+        if m:
+            out["name"] = m.group(1).strip()
+            out["id"] = m.group(2)
+            break
+    if out["id"]:
+        print(f"[READ] Card owner: {out['id']} {out.get('name', '')}".rstrip())
+    else:
+        print(f"[CARDS] Could not read End-Customer from {card_part_number}.")
+    return out
+
+
 @timed
 def read_schedule_capacity(page: Page) -> list:
     """
@@ -562,9 +636,15 @@ def read_sor_data(page: Page) -> dict:
         "location_name": "",
         "location_address": "",
         "existing_end_customer": "",  # "Swift Wash (01435)" -- authoritative existing link
+        "existing_end_customer_id": "",
         "access_sharing": "",          # "Yes"/"No" -- drives 01 (grouped) vs 02 (new group) loc series
+        "shipping_method": "",
+        "shipping_comments": "",
         "sor_url": "",
     }
+
+    def _one_line(value) -> str:
+        return " ".join(str(value or "").split())
 
     so_url = page.url
     sor_href = read_sor_link(page)
@@ -593,12 +673,12 @@ def read_sor_data(page: Page) -> dict:
                 select = parent.locator('select')
                 if select.count() > 0:
                     result["processor_type"] = select.first.input_value()
-                    print(f"[READ] Processor type (select): '{result['processor_type']}'")
+                    print(f"[READ] Processor type (select): '{_one_line(result['processor_type'])}'")
                 else:
                     sibling_text = parent.inner_text().replace(text, "").strip()
                     if sibling_text:
                         result["processor_type"] = sibling_text
-                        print(f"[READ] Processor type (text): '{result['processor_type']}'")
+                        print(f"[READ] Processor type (text): '{_one_line(result['processor_type'])}'")
                 break
 
         if not result["processor_type"]:
@@ -609,12 +689,12 @@ def read_sor_data(page: Page) -> dict:
                     cells = row.locator('td, th').all()
                     if len(cells) >= 2:
                         result["processor_type"] = cells[-1].inner_text().strip()
-                        print(f"[READ] Processor type (table row): '{result['processor_type']}'")
+                        print(f"[READ] Processor type (table row): '{_one_line(result['processor_type'])}'")
                     break
     except Exception as e:
         print(f"[READ] Error reading processor type: {e}")
 
-    print(f"[READ] Final processor_type='{result['processor_type']}'")
+    print(f"[READ] Final processor_type='{_one_line(result['processor_type'])}'")
 
     # --- Read Required Delivery Date ---
     # DOM structure (validated from screenshot):
@@ -632,7 +712,7 @@ def read_sor_data(page: Page) -> dict:
             if value_span.count() > 0:
                 raw_text = value_span.inner_text().strip()
                 result["required_date_raw"] = raw_text
-                print(f"[READ] Required Delivery Date raw: '{raw_text}'")
+                print(f"[READ] Required Delivery Date raw: '{_one_line(raw_text)}'")
 
                 # Check for EXPEDITED flag
                 expedited = parent.locator('span.bs-red').first
@@ -674,7 +754,7 @@ def read_sor_data(page: Page) -> dict:
             value_span = parent.locator('span.col-9').first
             if value_span.count() > 0:
                 result["card_design_type"] = value_span.inner_text().strip()
-                print(f"[READ] Card design type: '{result['card_design_type']}'")
+                print(f"[READ] Card design type: '{_one_line(result['card_design_type'])}'")
             else:
                 print("[READ] No value span for Design type")
         else:
@@ -700,9 +780,55 @@ def read_sor_data(page: Page) -> dict:
                 val = parent.inner_text().replace(field, "").strip()
                 if val:
                     result[key] = val
-                    print(f"[READ] {field}: '{val}'")
+                    if key == "existing_end_customer":
+                        m = re.search(r'\((\d{3,})\)', val)
+                        if m:
+                            result["existing_end_customer_id"] = m.group(1)
+                    print(f"[READ] {field}: '{_one_line(val)}'")
     except Exception as e:
         print(f"[READ] Error reading contact/location info: {e}")
+
+    # --- Read Shipping Method + comments ---
+    try:
+        labels = page.locator('label, th, td, dt').all()
+        for label in labels:
+            text = label.inner_text().strip()
+            text_l = text.lower()
+            is_shipping_label = (
+                ("ship" in text_l and "method" in text_l)
+                or "shipping method" in text_l
+                or "delivery method" in text_l
+            )
+            if is_shipping_label:
+                parent = label.locator('..')
+                sel = parent.locator('select')
+                if sel.count() > 0:
+                    result["shipping_method"] = sel.first.evaluate(
+                        'el => el.options[el.selectedIndex]?.text || ""'
+                    ).strip()
+                else:
+                    val = parent.inner_text().replace(text, "").strip()
+                    if val:
+                        result["shipping_method"] = val
+                if result["shipping_method"]:
+                    print(f"[READ] Shipping method: '{_one_line(result['shipping_method'])}'")
+                    break
+
+        comments_labels = page.locator('label, th').filter(has_text="Comments").all()
+        for cl in comments_labels:
+            parent = cl.locator('..')
+            comment_text = parent.inner_text().replace("Comments", "").strip()
+            if comment_text:
+                result["shipping_comments"] = comment_text
+                print(f"[READ] Shipping comments: '{_one_line(comment_text)}'")
+                if not result["shipping_method"] and (
+                    "NEXT DAY" in comment_text.upper() or "OVERNIGHT" in comment_text.upper()
+                ):
+                    result["shipping_method"] = "NEXT DAY"
+                    print("[READ] Shipping urgency from comments: NEXT DAY")
+                break
+    except Exception as e:
+        print(f"[READ] Error reading shipping method/comments: {e}")
 
     # Navigate back to SO
     print(f"[NAV] Returning to SO: {so_url}")
@@ -895,14 +1021,16 @@ def _clear_customer_id_if_blocking(page: Page) -> bool:
 
 
 @timed
-def save_so(page: Page, accept_sor: bool = False) -> None:
+def save_so(page: Page, accept_sor: bool = False, clear_customer_location_blocker: bool = True) -> None:
     """
     Click Save. Auto-dismiss the 'Transition SOR?' popup if it appears.
     Pre-checks Customer ID / Location blocker before saving.
     MOOPS save is AJAX — no page navigation occurs.
     """
-    # Pre-save check: clear Customer ID if Location is empty (blocks save)
-    _clear_customer_id_if_blocking(page)
+    # Pre-save check: clear Customer ID if Location is empty (blocks save).
+    # Cards-only orders can legitimately carry a customer id without a location.
+    if clear_customer_location_blocker:
+        _clear_customer_id_if_blocking(page)
 
     print("[ACTION] Saving SO...")
     # MOOPS save triggers a full page reload (gears → reload → "successfully saved").
@@ -1275,7 +1403,7 @@ def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "") -> st
     if not actual_pn:
         try:
             page_text = page.locator('h1, h2, h3, .page-title, [class*="title"]').first.inner_text(timeout=2000)
-            match = _re.search(r'(CARD-MD-[A-Z0-9]+)', page_text.upper())
+            match = _re.search(r'(CARD-MD-[A-Z0-9-]+)', page_text.upper())
             if match:
                 actual_pn = match.group(1)
         except Exception:
@@ -1284,13 +1412,15 @@ def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "") -> st
     if not actual_pn:
         try:
             body = page.locator('body').first.inner_text(timeout=3000)
-            match = _re.search(r'(CARD-MD-[A-Z0-9]+)', body.upper())
+            match = _re.search(r'(CARD-MD-[A-Z0-9-]+)', body.upper())
             if match:
                 actual_pn = match.group(1)
         except Exception:
             pass
 
-    if actual_pn and actual_pn != new_part_number:
+    if actual_pn and new_part_number.startswith(actual_pn) and actual_pn != new_part_number:
+        print(f"[WARNING] Ignoring partial card number detection: {actual_pn}; using {new_part_number}")
+    elif actual_pn and actual_pn != new_part_number:
         print(f"[INFO] Card renamed: {new_part_number} -> {actual_pn}")
         new_part_number = actual_pn
     elif not actual_pn:
@@ -2223,6 +2353,31 @@ def upload_files_to_so(page: Page, paths: list) -> bool:
     return uploaded
 
 
+def read_config_file_resources(page: Page) -> list:
+    """Return unique .cfg filenames currently visible in the SO File Resources area."""
+    try:
+        names = page.evaluate(r"""() => {
+            const text = document.body ? (document.body.innerText || '') : '';
+            const matches = text.match(/[^\s"'<>]+\.cfg\b/gi) || [];
+            const seen = new Set();
+            const out = [];
+            for (const raw of matches) {
+                const name = raw.replace(/[),.;:]+$/, '');
+                const key = name.toLowerCase();
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    out.push(name);
+                }
+            }
+            return out;
+        }""")
+        print(f"[READ] Config files visible on SO: {len(names or [])}")
+        return names or []
+    except Exception as e:
+        print(f"[READ] Could not read config file resources ({e})")
+        return []
+
+
 @timed
 def action_add_card_to_so(page: Page, card_part_number: str) -> None:
     """
@@ -2444,7 +2599,13 @@ def read_sor_shipping_method(page: Page) -> str:
         labels = page.locator('label, th, td, dt').all()
         for label in labels:
             text = label.inner_text().strip()
-            if ("Ship" in text and "Method" in text) or "Delivery" in text.title():
+            text_l = text.lower()
+            is_shipping_label = (
+                ("ship" in text_l and "method" in text_l)
+                or "shipping method" in text_l
+                or "delivery method" in text_l
+            )
+            if is_shipping_label:
                 parent = label.locator('..')
                 sel = parent.locator('select')
                 if sel.count() > 0:

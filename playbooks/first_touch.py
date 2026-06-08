@@ -190,6 +190,18 @@ def run(page, so_id, assembly_week=None, no_itf=False, dedup_test=False):
     contact_email = sor_data.get("contact_email", "")
     if contact_name:
         print(f"Contact: {contact_name} / {contact_email}")
+
+    # The SOR can name an existing end customer even when the SO field is still blank.
+    # Treat that as the customer identity for this run: create a new location under that
+    # customer, skip user/intro, then link the SO after the location is saved.
+    sor_existing_id = (sor_data.get("existing_end_customer_id", "") or "").strip()
+    if not cust_id and sor_existing_id:
+        sor_existing_name = (sor_data.get("existing_end_customer", "") or "").strip()
+        sor_existing_name = re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", sor_existing_name).strip()
+        existing_cust = {"name": sor_existing_name, "id": sor_existing_id}
+        cust_id = sor_existing_id
+        print(f"[INFO] SOR Existing End Customer: {sor_existing_name or '(name blank)'} "
+              f"({cust_id}) -- treating as existing; will create/link location only")
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 3: Schedule + assembly week
@@ -308,7 +320,11 @@ def run(page, so_id, assembly_week=None, no_itf=False, dedup_test=False):
     # Step 7: Save
     t0 = time.time()
     print("\n--- Step 7: Save SO ---")
-    save_so(page, accept_sor=False)
+    # Existing-customer system orders may have the customer populated before the
+    # location is linked. Never clear that customer just to get an interim save
+    # through; the optimized chain will link/verify the location next.
+    save_so(page, accept_sor=False,
+            clear_customer_location_blocker=not (no_itf and existing_cust and existing_cust.get("id")))
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 8: ITF form
@@ -464,7 +480,7 @@ def run(page, so_id, assembly_week=None, no_itf=False, dedup_test=False):
     # Step 10: Set task checklist -- deferred to the provisioning chain when no_itf, so it
     # runs AFTER the card + cust id + location exist (correct card/task-3 detection).
     t0 = time.time()
-    if no_itf:
+    if no_itf and not is_route:
         print("\n--- Step 10: Task checklist deferred to the provisioning chain (runs at the end) ---")
     else:
         print("\n--- Step 10: Set task checklist ---")

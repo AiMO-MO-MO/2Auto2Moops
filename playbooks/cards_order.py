@@ -17,6 +17,7 @@ Steps:
   6. Work State -> Placed (human does this + Accept SOR)
 """
 
+import re as _re
 import time
 
 from core.browser import navigate_to_so
@@ -24,6 +25,7 @@ from core.moops import (
     read_products,
     read_customer_name,
     read_sor_data,
+    read_so_end_customer,
     read_existing_customer_id,
     save_so,
     set_shipment,
@@ -55,7 +57,6 @@ def build_cards_tag(products: list, customer_name: str, sor_card_qty: int = 0) -
             if desc and not card_desc_name:
                 first_line = desc.split("\n")[0].strip()
                 # Strip trailing " card" or " Card"
-                import re as _re
                 card_desc_name = _re.sub(r'\s+cards?\s*$', '', first_line, flags=_re.IGNORECASE).strip()
         elif pn == "CARD-01-02" and card_qty == 0:
             card_qty = qty
@@ -130,7 +131,10 @@ def run(page, so_id, shortname=None):
     tag_value = build_cards_tag(so_data["products"], so_data["customer_name"],
                                  sor_card_qty=sor_card_qty)
     print(f"Tag: {tag_value}")
-    action_set_tag(page, tag_value)
+    if so_data.get("tag") == tag_value:
+        print("[INFO] Tag already correct -- skip")
+    else:
+        action_set_tag(page, tag_value)
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 4: Set order type + shipment
@@ -140,8 +144,17 @@ def run(page, so_id, shortname=None):
     set_shipment(page, method="Drop shipment", shipped_by="Card Supplier")
     print(f"  [{time.time() - t0:.1f}s]")
 
-    # Read existing customer ID while we're still on the SO page
-    existing_cust = read_existing_customer_id(page)
+    # Resolve card owner while we're still on the SO page. Prefer the live SO field,
+    # then the older notes parser, then the SOR's Existing End Customer.
+    existing_cust = read_so_end_customer(page)
+    if not existing_cust.get("id"):
+        existing_cust = read_existing_customer_id(page)
+    if not existing_cust or not existing_cust.get("id"):
+        sor_existing_id = (sor_data.get("existing_end_customer_id", "") or "").strip()
+        if sor_existing_id:
+            sor_existing_name = (sor_data.get("existing_end_customer", "") or "").strip()
+            sor_existing_name = _re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", sor_existing_name).strip()
+            existing_cust = {"name": sor_existing_name, "id": sor_existing_id}
     cust_id = existing_cust.get("id", "") if existing_cust else ""
     if cust_id:
         print(f"[INFO] Existing customer: {existing_cust['name']} (ID: {cust_id})")
@@ -149,16 +162,16 @@ def run(page, so_id, shortname=None):
     # Save before card workflow (tag + order type + shipment)
     t0 = time.time()
     print("\n--- Save SO (before card workflow) ---")
-    save_so(page, accept_sor=False)
+    save_so(page, accept_sor=False, clear_customer_location_blocker=False)
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 5: Card workflow -- delegates entirely to _do_cards (same as system run).
-    from run import _do_cards, _card_type
-    ct = _card_type(card_design)
+    from run import _do_cards
     is_generic = any(
         p["part_number"].upper().startswith("CARD-MD-GEN")
         for p in so_data["products"]
     )
+    card_result = "none"
 
     if is_generic:
         print("\n--- Generic cards — no card workflow needed ---")
@@ -166,7 +179,7 @@ def run(page, so_id, shortname=None):
     else:
         # Pass the SOR we already read and the shortname override (if any).
         # _do_cards handles new/modify/reprint/exists/none uniformly.
-        _do_cards(page, so_id, cust_id, sor=sor_data, shortname=shortname)
+        card_result = _do_cards(page, so_id, cust_id, sor=sor_data, shortname=shortname)
 
     # Summary
     elapsed = time.time() - t_start
@@ -174,10 +187,7 @@ def run(page, so_id, shortname=None):
     print("\n" + "=" * 60)
     print("  CARDS ORDER COMPLETE")
     print(f"  SO-{so_id}: {tag_value}")
-    if needs_new_card and card_part:
-        print(f"  Card: {card_part}")
-    if po_url:
-        print(f"  PO: {po_url}")
+    print(f"  Card workflow: {card_result}")
     print("  Remaining:")
     print("    Work State -> Placed -> Accept SOR")
     print("=" * 60)
