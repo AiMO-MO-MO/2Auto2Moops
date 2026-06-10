@@ -2348,7 +2348,7 @@ def upload_files_to_so(page: Page, paths: list) -> bool:
             print(f"[CONFIG] NOT confirmed on page: {', '.join(missing)} -- verify manually or re-attach.")
     except Exception:
         print(f"[CONFIG] Could not verify upload -- check File Resources on the SO manually.")
-        uploaded = True  # assume ok if we can't check
+        uploaded = False  # do NOT assume success when we can't confirm
 
     return uploaded
 

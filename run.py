@@ -1132,7 +1132,7 @@ def _do_config_files(page, so_id):
     file was uploaded."""
     import os
     from pathlib import Path
-    from core.moops import download_vac_configs, read_config_file_resources, upload_files_to_so
+    from core.moops import download_vac_configs, read_config_file_resources, upload_files_to_so, save_so
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vac_configs", f"SO{so_id}")
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -1148,10 +1148,18 @@ def _do_config_files(page, so_id):
     paths = download_vac_configs(page, so_id, out_dir)
     if not paths:
         return False
-    uploaded = upload_files_to_so(page, paths)
+    upload_files_to_so(page, paths)
+    # The .cfg attachments don't persist or show in File Resources until the SO is saved.
+    # Save ONCE for all the files (not one save per file), THEN verify against what's
+    # actually on the SO (Matt: "need to save before you can verify those").
+    save_so(page, accept_sor=False, clear_customer_location_blocker=False)
     after = read_config_file_resources(page)
-    print(f"[CONFIG] File Resources after config run: {len(after)} .cfg file(s)")
-    return uploaded
+    print(f"[CONFIG] File Resources after save: {len(after)} .cfg file(s)")
+    verified = len(after) > len(before)
+    if not verified:
+        print("[CONFIG] Upload NOT confirmed in File Resources after save (count did not "
+              "increase) -- task 9 stays To Do; re-attach or re-run.")
+    return verified
 
 
 def _addr_norm(value):
@@ -1418,16 +1426,21 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     # Cards (tasks 3/4/5). _do_cards runs the right card lane and reports which: "new"
     # (design email -> task 3), "reprint" (PO sent -> task 5), or "none".
     card_kind = _card_type((sor or {}).get("card_design_type", ""))
-    if ({3, 4, 5} & todo) and card_kind != "none":
+    # The card is CREATED/CLONED at task 3 (new/modify design) or the PO is cut at task 5
+    # (reprint). Gate the clone on THAT task being To Do -- once it is Completed the card
+    # already exists, and tasks 4/5 (approval / PO look-back) must NOT trigger another clone.
+    # Firing on any of {3,4,5} is what bumped CARD-MD-Xn -> Xn+1 on every re-run.
+    card_design_todo = (3 in todo) if card_kind in ("new", "modify") else (5 in todo)
+    if card_kind != "none" and card_design_todo:
         print("\n--- Cards ---")
         card_result = _do_cards(page, so_id, cust_id, sor=sor)
-    elif {3, 4, 5} & todo:
+    elif ({3, 4, 5} & todo) and card_kind == "none":
         print("\n--- Cards: skip (SOR has no actionable card design type) ---")
         for n in (3, 4, 5):
             if n in todo:
                 pre_done[n] = "N/A"
     else:
-        print("\n--- Cards: skip (card tasks done / N-A) ---")
+        print("\n--- Cards: skip (card already made / tasks done / N-A) ---")
 
     # End Customer on the SO -- MUST happen before config: MOOPS uses the linked
     # customer + location to populate CustomerKey and LocationID in the .cfg file.
