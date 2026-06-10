@@ -395,9 +395,22 @@ def _expand_verb(argv):
     return cmd + extra
 
 
-def _do_create_customer(page, so_id, cust_id=None, preview=False):
+def _do_create_customer(page, so_id, cust_id=None, preview=False, data=None):
     """Gather SO/SOR data and fill the Create Customer form (no submit).
-    Shared by the CLI dispatch and the console."""
+    Shared by the CLI dispatch and the console.
+    If `data` is provided (already read by the snapshot), fill from it instead of
+    re-reading the SO/SOR -- the snapshot-driven path. Returns the cust id used."""
+    if data is not None:
+        cid = cust_id or provisioning.next_customer_id(page)
+        provisioning.fill_create_customer(page, {
+            "so_id": so_id,
+            "customer_name": data.get("customer_name", ""),
+            "contact_name": data.get("contact_name", ""),
+            "contact_email": data.get("contact_email", ""),
+            "contact_phone": data.get("contact_phone", ""),
+            "is_route": bool(data.get("is_route")),
+        }, cust_id=cid, preview=preview)
+        return cid
     from core.moops import (read_internal_notes, read_sale_or_route,
                             read_existing_customer_id, read_sor_data)
     navigate_to_so(page, so_id)
@@ -429,6 +442,7 @@ def _do_create_customer(page, so_id, cust_id=None, preview=False):
         "contact_phone": contact_phone,
         "is_route": is_route,
     }, cust_id=cid, preview=preview)
+    return cid
 
 
 _STATE_CODE = {
@@ -822,10 +836,41 @@ def _do_system(page, so_id, assembly_week=None, dedup_test=True):
         _print_system_write_summary(result)
         return
 
-    print("\n[SYSTEM] Snapshot found new-customer setup work; continuing with legacy customer-creation flow.")
-    res = first_touch.run(page, so_id, assembly_week=assembly_week,
-                          no_itf=True, dedup_test=dedup_test)
-    _post_first_touch(page, so_id, res, True)
+    # No effective customer id -> NEW customer. SAME snapshot-driven path as the existing
+    # case: setup (tag/week/parts) -> create the customer from the snapshot -> provision
+    # chain. The ONLY difference from the existing branch is the create step. No re-read of
+    # the SO/SOR, no legacy first_touch flow.
+    snap = plan.get("_snapshot", {})
+    so_data = snap.get("so_data", {})
+    sor_data = snap.get("sor_data", {})
+    print("\n[SYSTEM] New customer -- snapshot-driven setup + create (no re-read, no legacy flow).")
+    pre_done = _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=assembly_week)
+    print("\n--- Create Customer (fill only, from snapshot) ---")
+    cust_id = _do_create_customer(page, so_id, data={
+        "customer_name": sor_data.get("location_name", ""),
+        "contact_name": sor_data.get("contact_name", ""),
+        "contact_email": sor_data.get("contact_email", ""),
+        "contact_phone": sor_data.get("contact_phone", ""),
+        "is_route": bool(so_data.get("is_route")),
+    })
+    try:
+        input("\n[SYSTEM] Review the Create Customer form, SAVE it in the browser, then press "
+              "Enter to continue (Ctrl+C to stop).")
+    except (EOFError, KeyboardInterrupt):
+        print("\n[SYSTEM] Stopped before the provisioning chain.")
+        return
+    result = _do_provision_chain(
+        page,
+        so_id,
+        cust_id,
+        existing=False,
+        verify_only=False,
+        sor=sor_data,
+        pre_done=pre_done,
+        force_config=bool(plan.get("force_config")),
+    )
+    _print_system_write_summary(result)
+    return
 
 
 def _print_system_write_summary(result):
