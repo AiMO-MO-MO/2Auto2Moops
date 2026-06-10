@@ -1,0 +1,36 @@
+{"orders":[
+ {"sor":"SOR-27871","sor_url":"https://moops.mitechisys.com/order-requests/27871","desc":"New System — 965 Laundromat","loc":"965 Amsterdam Ave, New York NY","contact":"Igor/Eric Shamalov · nyadm07@gmail.com · 718-640-5775",
+  "admin":{"verdict":"existing","matches":[
+   {"id":"00204","name":"Happy Laundromat","signal":"email","strength":"strong","detail":"nyadm07@gmail.com","contact":"Eric Shamalov · 718-640-5775"},
+   {"id":"00652","name":"128W Laundromat","signal":"name","strength":"weak","detail":"128w","contact":"Roman Kaykov · 718-344-1977"}]},
+  "sf":{"verdict":"existing","matches":[
+   {"object":"Account","id":"0015f00000RE9GUAA1","name":"Wash and Chill","lw":"00652","signal":"custid","strength":"strong","note":"End Customer 00652; new loc 965 Amsterdam NOT yet in SF","url":"https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000RE9GUAA1/view"},
+   {"object":"Account","id":"0015f00000hdObIAAU","name":"Happy Laundries","lw":"00204","signal":"phone+email","strength":"strong","note":"contact Shamalov belongs HERE — different customer than End Customer","url":"https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000hdObIAAU/view"}]},
+  "verdict":"EXISTING — ⚠ WHICH CUSTOMER","flag":"⚠ WHICH CUSTOMER? End Customer = 128W Laundromat (00652 / SF 'Wash and Chill') but contact Shamalov belongs to Happy Laundromat (00204). New location 965 Amsterdam not in SF — confirm the parent customer before creating.","why":"Both 00652 (named on SOR) and 00204 (contact's account) are existing customers. Multi-store owner. No Cents Location ID on the new site, but pick the right parent first."},
+ {"sor":"SOR-27872","sor_url":"https://moops.mitechisys.com/order-requests/27872","desc":"HAMILTON ENTERPRISES LLC","loc":"1638 Nottingham Way, Trenton NJ","contact":"(existing End Customer: Wash'n Up 00720)",
+  "admin":{"verdict":"existing","matches":[
+   {"id":"00720","name":"Wash'n Up","signal":"custid","strength":"strong","detail":"named on SOR (End Customer)","contact":"cust 00720 — name-token search missed ('wash' is a stopword)"}]},
+  "sf":{"verdict":"existing","matches":[
+   {"object":"Account","id":"001S6000007pUkZIAU","name":"Wash'n Up","lw":"00720","signal":"custid","strength":"strong","note":"End Customer 00720; new loc 1638 Nottingham NOT yet in SF","url":"https://trycentssf.lightning.force.com/lightning/r/Account/001S6000007pUkZIAU/view"}]},
+  "verdict":"EXISTING — both (easy)","flag":"✓ EASY — existing customer Wash'n Up (00720) adding a location. No Cents Location ID conflict.","why":"CUSTID 00720 confirmed in both systems. New location, no live-Cents conflict."},
+ {"sor":"SOR-26542","sor_url":"https://moops.mitechisys.com/order-requests/26542","desc":"ESD replacement order — Bubble Blast","loc":"17445 US-192, Clermont FL","contact":"Inigo Sanchez · inigosangon@gmail.com · 213-793-1347",
+  "admin":{"verdict":"potential","matches":[{"id":"—","name":"(no email/phone match)","signal":"surname noise","strength":"weak","detail":"6 'Sanchez' decoys — none match Inigo"}]},
+  "sf":{"verdict":"existing","matches":[{"object":"Account","id":"0015f00000QPoSoAAL","name":"Laundromart of Four Corners, LLC","lw":null,"signal":"address+owner","strength":"strong","note":"Cents Location ID 513 (live); LW null = not provisioned","url":"https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000QPoSoAAL/view"}]},
+  "verdict":"EXISTING — 🚩 FLAG","flag":"🚩 HARD TO COMBINE — Cents Location ID 513 (live Cents POS identity). Manual reconciliation.","why":"In SF on a live-Cents location; not in Laundroworks. Don't auto-create/link."},
+ {"sor":"SOR-27863","sor_url":"https://moops.mitechisys.com/order-requests/27863","desc":"Jaafar — Rio Grande 2","loc":"5885 S Archer Ave, Chicago IL","contact":"Jaafar Alamili · joe.sons1090@gmail.com · 773-971-5633",
+  "admin":{"verdict":"existing","matches":[{"id":"00608","name":"Lavanderia Rio Grande","signal":"name","strength":"strong","detail":"card brand","contact":"Sam Khalaf · 708-785-7800 · dealer Midwest"}]},
+  "sf":{"verdict":"existing","matches":[{"object":"Account","id":"0015f00000QPrfpAAD","name":"South Side Laundries","lw":null,"signal":"address","strength":"strong","note":"Prospect, no Cents Location ID; not cross-linked to Admin 00608","url":"https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000QPrfpAAD/view"}]},
+  "verdict":"EXISTING — both (easy)","flag":"✓ EASY — SF Prospect, no Cents Location ID. Convertible (location #2).","why":"Admin 00608 by name + SF by address, under different names; existing customer adding a location."},
+ {"sor":"SOR-27302","sor_url":"https://moops.mitechisys.com/order-requests/27302","desc":"Laundry System","loc":"Laundry Palace — 398 N 4th St, Sunbury PA","contact":"Billy · directlaundry2@aol.com · 917-678-2095",
+  "admin":{"verdict":"potential","matches":[{"id":"00475/00483/01045 +3","name":"Laundry/Palace decoys","signal":"name (palace)","strength":"weak","detail":"all NY · no contact match"}]},
+  "sf":{"verdict":"new","matches":[{"object":"Account","id":"001S6000007pUejIAE","name":"Laundry Palace","lw":"00483","signal":"name","strength":"weak","note":"NY decoy; order is Sunbury PA","url":"https://trycentssf.lightning.force.com/lightning/r/Account/001S6000007pUejIAE/view"}]},
+  "verdict":"NEW","flag":"","why":"Only 'Palace' name decoys, all NY; no email/phone/address match to the Sunbury PA order."},
+ {"sor":"SOR-27755","sor_url":"https://moops.mitechisys.com/order-requests/27755","desc":"PW Wash Barn","loc":"Excelsior Springs MO","contact":"Dakota Roberts · dakotaroberts12@yahoo.com · 417-298-4112",
+  "admin":{"verdict":"potential","matches":[{"id":"—","name":"(no email/phone match)","signal":"surname noise","strength":"weak","detail":"5 'Roberts' decoys"}]},
+  "sf":{"verdict":"new","matches":[]},
+  "verdict":"NEW","flag":"","why":"No contact/name/address match in either system."},
+ {"sor":"SOR-27723","sor_url":"https://moops.mitechisys.com/order-requests/27723","desc":"BAM BAM'S LAUNDRY","loc":"Martin Storage — 331 Mims Rd, Sylvania GA","contact":"Chris Martin · martinstorageunits@gmail.com · 912-977-1240",
+  "admin":{"verdict":"potential","matches":[{"id":"00977 +3","name":"Bam's Laundry (AL) · Martin decoys","signal":"name/last name","strength":"weak","detail":"AL + surname noise"}]},
+  "sf":{"verdict":"new","matches":[{"object":"Account","id":"0015f00001Gn43VAAR","name":"BAM’S Coin Laundry","lw":"00977","signal":"name","strength":"weak","note":"Pell City AL; order is GA","url":"https://trycentssf.lightning.force.com/lightning/r/Account/0015f00001Gn43VAAR/view"}]},
+  "verdict":"NEW","flag":"","why":"Alabama 'Bam's' decoy + 'Martin' surname noise; GA store, no contact/address match."}
+]}
