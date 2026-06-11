@@ -907,13 +907,17 @@ def check_customer_setup(page, cust_id):
     return info
 
 
-def next_location_id(page, cust_id, shared=True):
+def next_location_id(page, cust_id, shared=True, from_current_page=False):
     """Next Location ID under an EXISTING customer. Access-sharing ON -> 01 series
-    (max existing 01 + 1; cards shared/grouped); OFF -> 02 series (separate). Reads the
-    customer's existing location ids off the Admin page. VERIFY -- the 01-vs-02 choice
-    depends on the SOR's Access Sharing field, which the human confirms."""
-    page.goto(f"{ADMIN_BASE}/customers/{cust_id}", wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(1200)
+    (max existing 01 + 1; cards shared/grouped); OFF -> 02 series (separate). VERIFY -- the
+    01-vs-02 choice depends on the SOR's Access Sharing field, which the human confirms.
+
+    from_current_page=True reads the existing ids off the CURRENT LaundroPortal location index
+    (we're already there) instead of navigating to the Admin/cust-id window -- keeps all the
+    location work in one pass (cust-id and location are different windows; don't bounce)."""
+    if not from_current_page:
+        page.goto(f"{ADMIN_BASE}/customers/{cust_id}", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1200)
     ids = page.evaluate(
         r"""() => { const s = new Set();
             document.querySelectorAll('option, td, th, span').forEach(e => {

@@ -88,6 +88,17 @@ def read_portal_location_index(page: Page, cust_id: str) -> list:
     rows = []
     if not login_to_portal(page, cust_id):
         return rows
+    # The locations table loads via AJAX after the page shell. Reading immediately returns
+    # 0 rows even when the customer has locations -- that false "0 rows" is what made the
+    # chain think a provisioned customer had none and bail. Wait for a Location ID (7 digits)
+    # to render before reading. (A genuinely empty customer just waits out the timeout.)
+    try:
+        page.wait_for_function(
+            r"() => { const t = document.body ? document.body.innerText : ''; return /\b\d{7}\b/.test(t); }",
+            timeout=8000,
+        )
+    except Exception:
+        pass
     try:
         rows = page.evaluate(r"""() => {
             const out = [];

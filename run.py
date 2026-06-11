@@ -923,17 +923,11 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
     print("=" * 60)
     navigate_to_so(page, so_id)
 
-    if needs_tag:
-        print("\n--- Setup: Set tag ---")
-        tag_value = build_tag(so_data.get("products", []), so_data.get("customer_name", ""))
-        print(f"Tag: {tag_value}")
-        action_set_tag(page, tag_value)
-        changed = True
-    else:
-        print(f"\n--- Setup: Tag already set ({so_data.get('tag')}) -- skip ---")
-
+    # Resolve the assembly week BEFORE touching any SO field: reading capacity navigates to
+    # the Sales Orders page and back, which would drop an unsaved tag if done mid-form.
+    chosen_week = chosen_label = None
+    pick_reason = ""
     if needs_week:
-        print("\n--- Setup: Set assembly week ---")
         chosen_week = assembly_week
         chosen_label = assembly_week
         pick_reason = "Manual override via --assembly-week" if assembly_week else ""
@@ -958,6 +952,28 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
                     is_expedited=bool(sor_data.get("is_expedited")),
                     order_weight=order_weight,
                 )
+        # The capacity read navigated away -- get back on the SO before clearing/filling.
+        navigate_to_so(page, so_id)
+
+    # Clear the cust-id/End-Customer field NOW -- AFTER all navigation, BEFORE filling any
+    # field. MOOPS won't save an SO that has a cust id but no location yet (known bug), and
+    # clearing it at save time can drop the just-filled tag/week. The End Customer (cust +
+    # location) is re-linked at the end of the chain once the location exists.
+    from core.moops import _clear_customer_id_if_blocking
+    if _clear_customer_id_if_blocking(page):
+        print("[SETUP] Cleared End-Customer field (no location yet) so tag/week/parts can save.")
+
+    if needs_tag:
+        print("\n--- Setup: Set tag ---")
+        tag_value = build_tag(so_data.get("products", []), so_data.get("customer_name", ""))
+        print(f"Tag: {tag_value}")
+        action_set_tag(page, tag_value)
+        changed = True
+    else:
+        print(f"\n--- Setup: Tag already set ({so_data.get('tag')}) -- skip ---")
+
+    if needs_week:
+        print("\n--- Setup: Set assembly week ---")
         if chosen_week:
             print(f">> PICKED: {chosen_label} ({chosen_week})")
             print(f"   Reason: {pick_reason}")
@@ -990,6 +1006,8 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
 
     if changed:
         print("\n--- Setup: Save SO ---")
+        # The cust-id blocker was already cleared up front (before the fields were filled),
+        # so don't re-clear at save time -- that could disturb the just-filled tag/week.
         save_so(page, accept_sor=False, clear_customer_location_blocker=False)
     else:
         print("\n--- Setup: No SO field/part changes to save ---")
@@ -1225,16 +1243,13 @@ def _resolve_existing_location_id(page, cust_id, sor):
     except Exception as e:
         print(f"[CHAIN] Existing location lookup failed ({e}).")
         print(f"[CHAIN] Make sure LaundroPortal is signed in and can open customer {cust_id}.")
-    try:
-        return input("[CHAIN] Paste the existing Location ID to link on the SO "
-                     "(blank = skip config this run): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\n[CHAIN] No location id provided.")
-        return ""
+    # No match and no error -> this address isn't an existing location, so DON'T prompt for
+    # one. Return empty; the caller creates a NEW Portal location (clicks Add New Location).
+    return ""
 
 
 def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_config=False,
-                                  card_result="none"):
+                                  card_result="none", did_user_intro=False):
     """Checklist delta for existing/replacement chain runs."""
     done = {}
     if did_stripe:
@@ -1243,6 +1258,8 @@ def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_conf
         done[8] = "Completed"
     if did_config:
         done[9] = "Completed"
+    if did_user_intro:
+        done[10] = "Completed"
     if card_result == "new":
         done[3], done[4], done[5] = "Completed", "To Do", "To Do"
     elif card_result == "reprint":
@@ -1360,23 +1377,18 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                 print(f"[CHAIN] Existing location {loc_id} will be linked on the SO; no new location created.")
                 write_actions.append(f"verified existing Portal location {loc_id}")
             else:
-                print("[CHAIN] No existing location selected.")
-                try:
-                    create_ok = input("[CHAIN] Type CREATE to make a new Portal location, "
-                                      "or press Enter to stop this run: ").strip().upper()
-                except (EOFError, KeyboardInterrupt):
-                    create_ok = ""
-                if create_ok != "CREATE":
-                    print("[CHAIN] Stopping before location creation. No new Portal location made.")
-                    return
-                print("[CHAIN] CREATE confirmed -- continuing to create a new Portal location.")
+                # The scan is only a DUPLICATE check -- no match means this location doesn't
+                # exist yet, so create it. No prompt, no stop (Matt: "make the location").
+                print("[CHAIN] No matching Portal location -- not a duplicate, creating a new one.")
                 acc = (sor.get("access_sharing", "") if sor else "").strip().lower()
                 shared = False if acc.startswith("no") else True
                 if acc:
                     print(f"[CHAIN] Access Sharing = {acc!r} -> {'01 (grouped)' if shared else '02 (new group)'} series")
                 else:
                     print("[CHAIN] Access Sharing not read -- defaulting to 01 (grouped) series; VERIFY.")
-                loc_id = provisioning.next_location_id(page, cust_id, shared=shared)
+                # We're already on the LP location index (just read it above) -- compute the
+                # next id from THAT window instead of bouncing to the Admin/cust-id page.
+                loc_id = provisioning.next_location_id(page, cust_id, shared=shared, from_current_page=True)
         else:
             loc_id = "0100001"
         if not verified_existing_location:
@@ -1399,14 +1411,47 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                 print(f"[CHAIN] Location Key = {loc_key}")
             else:
                 loc_key = input("[CHAIN] Couldn't read Location Key from any tab -- paste it: ").strip()
+            # The human may have CHANGED the Location ID at the save pause. Re-read the actual
+            # saved location and use THAT id for the End Customer link -- otherwise we link the
+            # original computed id, which won't match the row that was saved (Matt's case).
+            if loc_key:
+                try:
+                    saved = portal.read_portal_location(page, loc_key)
+                    actual_id = (saved.get("location_id") or "").strip()
+                    if actual_id and actual_id != loc_id:
+                        print(f"[CHAIN] Location ID changed at save: '{loc_id}' -> '{actual_id}' -- using yours.")
+                        loc_id = actual_id
+                except Exception as e:
+                    print(f"[CHAIN] Could not re-read saved location id ({e}) -- keeping '{loc_id}'.")
             did_location = bool(loc_key)  # a Location Key only exists once the location is saved
             if did_location:
                 write_actions.append(f"created/saved Portal location {loc_id} (Location_Key {loc_key})")
     else:
         print("\n--- Add Location: skip (task 8 done / replacement) ---")
 
+    # Admin Portal user + intro email (task 10) -- MUST run BEFORE Stripe: the Stripe merchant
+    # setup assigns bank/account access to the LaundroPortal user, so the user has to exist and
+    # be saved first. Skip for existing customers (they already have LP users; a never-
+    # provisioned existing customer is handled with a manual `adduser`).
+    user_created = False
+    if 10 in todo and not existing and not verify_only:
+        print("\n--- Add User (LaundroPortal) ---")
+        _do_adduser(page, so_id, cust_id, sor=sor)
+        if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
+                      "then press Enter to continue (Stripe next)..."):
+            return
+        user_created = True   # intro email is sent AFTER Stripe (user -> Stripe -> intro)
+    else:
+        print("\n--- Add User: skip (task 10 done / existing / replacement) ---")
+        # Existing (provisioned) customers already have a Portal user + intro email -- the
+        # chain doesn't re-create it, so count task 10 as done (Matt: it's already done).
+        # A rare existing-but-unprovisioned customer is handled with a manual `adduser`.
+        if existing and not verify_only and 10 in todo:
+            did_user_intro = True
+
     # Stripe (task 7) -- ONLY for Stripe processors. Fortis/EBT orders (KIT-A35) run on
     # Fortis, not a Stripe merchant, so skip Stripe entirely for them. Needs a location key.
+    # Runs AFTER the user so the merchant setup can assign bank/account access to that user.
     pt = (sor.get("processor_type", "") if sor else "").upper()
     is_fortis = ("FORTIS" in pt) or ("EBT" in pt) or pt.strip() == "2"
     if 7 in todo and not verify_only and not is_fortis:
@@ -1422,6 +1467,13 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         print(f"\n--- Stripe: SKIP (Fortis/EBT processor {pt!r} -- payment processing is Fortis, not Stripe) ---")
     else:
         print("\n--- Stripe: skip (task 7 done / replacement) ---")
+
+    # Intro email (task 10, part 2) -- sent AFTER Stripe so the customer's login AND payment
+    # processing are both ready when they receive it (user -> Stripe -> intro).
+    if user_created:
+        print("\n--- Intro email (Admin) ---")
+        provisioning.send_intro_email(page, cust_id)
+        did_user_intro = True
 
     # Cards (tasks 3/4/5). _do_cards runs the right card lane and reports which: "new"
     # (design email -> task 3), "reprint" (PO sent -> task 5), or "none".
@@ -1497,21 +1549,6 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     else:
         print("\n--- Config files: skip (task 9 done / N-A) ---")
 
-    # Admin Portal user + intro email (task 10) -- final customer-facing step.
-    # Skip for existing customers -- they already have LP users. For a never-provisioned
-    # existing customer, run `adduser <so> <cust>` as a targeted command.
-    if 10 in todo and not existing and not verify_only:
-        print("\n--- Add User (LaundroPortal) ---")
-        _do_adduser(page, so_id, cust_id, sor=sor)
-        if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
-                      "then press Enter for the intro email..."):
-            return
-        print("\n--- Intro email (Admin) ---")
-        provisioning.send_intro_email(page, cust_id)
-        did_user_intro = True
-    else:
-        print("\n--- User + intro: skip (task 10 done / existing / replacement) ---")
-
     # Task checklist.
     # NEW customer (first pass) -> set the full baseline map (action_set_system_tasks).
     # EXISTING/replacement -> CHECK OFF each task whose workflow the chain actually completed
@@ -1544,6 +1581,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             did_location=did_location,
             did_config=did_config,
             card_result=card_result,
+            did_user_intro=did_user_intro,
         )
         done.update(pre_done)
         # Cards decision tree -> task states:

@@ -159,10 +159,13 @@ def run(page, so_id, shortname=None):
     if cust_id:
         print(f"[INFO] Existing customer: {existing_cust['name']} (ID: {cust_id})")
 
-    # Save before card workflow (tag + order type + shipment)
+    # Save before card workflow (tag + order type + shipment). MOOPS won't save when the SO
+    # carries a cust id (End Customer) but no location yet -- the same bug we clear in the
+    # system setup. The card owner (cust_id) is already captured above, so clearing the SO
+    # End-Customer field to unblock the save is safe.
     t0 = time.time()
     print("\n--- Save SO (before card workflow) ---")
-    save_so(page, accept_sor=False, clear_customer_location_blocker=False)
+    save_so(page, accept_sor=False, clear_customer_location_blocker=True)
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 5: Card workflow -- delegates entirely to _do_cards (same as system run).

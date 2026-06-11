@@ -1456,21 +1456,9 @@ def open_card_design_email(page: Page, card_part_number: str,
         print(f"[ERROR] Could not open Card Design Email: {e}")
         return
 
-    # Step 2: Clear CC field
-    try:
-        modal = page.locator('#design-email-modal')
-        cc_input = modal.locator('input').nth(1)  # To is 0, CC is 1
-        # Try finding by label
-        labels = modal.locator('td, th, label').all()
-        for i, lbl in enumerate(labels):
-            if "CC" in lbl.inner_text() and "BCC" not in lbl.inner_text():
-                cc_input = lbl.locator('..').locator('input').first
-                break
-        cc_input.click()
-        cc_input.fill("")
-        print("[ACTION] CC cleared")
-    except Exception as e:
-        print(f"[WARNING] Could not clear CC: {e}")
+    # Step 2: KEEP the CC field. The card DESIGN email must retain its CC (e.g. graphics@);
+    # only the PO email clears CC. Clearing it here is the regression Matt flagged.
+    modal = page.locator('#design-email-modal')
 
     # Step 3: Update message body with correct card part number and contact info
     try:
@@ -2034,10 +2022,11 @@ def action_add_required_parts(page: Page, processor_type: str = None,
             print(f"[SKIP] {mp} qty={mq} — already on order")
             continue
 
-        # 3. "OLD VERSION" in description — outdated mapping
-        if "OLD VERSION" in desc_upper:
-            flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — OLD VERSION ({desc[:50]})")
-            print(f"[SKIP] {mp} qty={mq} — OLD VERSION in description")
+        # 3. "OLD VERSION" / "OBSOLETE" in description — outdated mapping. MOOPS often disables
+        # the Add-To-Order button for these (a disabled button hung a run), so never auto-add.
+        if "OLD VERSION" in desc_upper or "OBSOLETE" in desc_upper:
+            flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — obsolete/old version ({desc[:50]})")
+            print(f"[SKIP] {mp} qty={mq} — obsolete/old version in description")
             continue
 
         # 4. Blocker plates from X-series / USX readers (CR-*-126 family) — built-in blockouts
@@ -2046,10 +2035,14 @@ def action_add_required_parts(page: Page, processor_type: str = None,
             print(f"[SKIP] {mp} qty={mq} — X-series/USX reader ({source}) has built-in blockouts")
             continue
 
-        # 4b. Long power cable (02-06-78*) — almost never needed; flag, don't auto-add
-        if mp_upper.startswith("02-06-78"):
-            flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — long cable, rarely needed (add manually if required)")
-            print(f"[SKIP] {mp} qty={mq} — long cable, not auto-added")
+        # 4b. Reader companion cables (02-06-*) — broken-out BOM. MOOPS suggests every cable a
+        # reader *could* use (MDC vs ACA vs long vs start-pulse); the tech picks the right one
+        # per install, so NONE are auto-added. Flag for manual add (Matt: "those are the cables
+        # that fall into the not needed category"). Anything already on the order is kept by the
+        # "already on order" check above.
+        if mp_upper.startswith("02-06-"):
+            flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — reader cable, install-dependent (add manually if required)")
+            print(f"[SKIP] {mp} qty={mq} — reader cable, not auto-added")
             continue
 
         # 5. VAC pedestal/base (01-03-03) — large item, only if customer ordered it
@@ -2957,7 +2950,11 @@ def set_so_end_customer(page: Page, cust_id: str, location_id: str = "", save: b
     if save:
         print(f"[ACTION] End Customer = {cust_id}"
               + (f" / location {location_id}" if location_id else "") + " -- saving SO...")
-        save_so(page, accept_sor=False)
+        # We just DELIBERATELY set the End Customer + location, so do NOT run the
+        # clear-customer-blocker here. That check is only for a leftover SOR cust id with no
+        # location; running it now can wipe the link we just made or, via its loose label
+        # matching, touch the wrong field (e.g. the uninvoiced field). Save as-is.
+        save_so(page, accept_sor=False, clear_customer_location_blocker=False)
         return True
 
     print(f"[PAUSE] Verify End Customer = {cust_id}"

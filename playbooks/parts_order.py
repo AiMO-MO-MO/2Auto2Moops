@@ -118,6 +118,10 @@ def build_parts_tag(products: list, customer_name: str) -> str:
         if pn.startswith("CR-"):
             continue  # Already counted
 
+        # Wire splicers (03-01-43) are broken-out BOM, never a tag headline -- skip.
+        if pn.replace("-DS", "") == "03-01-43":
+            continue
+
         # Skip BOM parts whose qty matches any reader qty or total (implicit from kit explosion)
         if qty in bom_qtys and (pn.startswith("02-06-") or pn.startswith("01-05-")
                                     or pn.startswith("01-04-") or pn.startswith("03-01-")):
@@ -279,8 +283,11 @@ def run(page, so_id):
     sor_data = read_sor_data(page)
     sor_shipping = sor_data.get("shipping_method", "")
     sor_comments = sor_data.get("shipping_comments", "")
-    efs_ship_via = map_sor_to_efs_shipping(sor_shipping, sor_comments)
-    print(f"SOR shipping: '{sor_shipping}' -> EFS Ship Via: '{efs_ship_via}'")
+    # The Required Delivery Date (e.g. "Next Day") signals urgency even when the shipping-method
+    # field is blank -- feed it to the mapper so Next Day/Overnight doesn't fall through to Ground.
+    required_raw = sor_data.get("required_date_raw", "")
+    efs_ship_via = map_sor_to_efs_shipping(sor_shipping, f"{sor_comments} {required_raw}")
+    print(f"SOR shipping: '{sor_shipping}' (req: '{required_raw}') -> EFS Ship Via: '{efs_ship_via}'")
     print(f"  [{time.time() - t0:.1f}s]")
 
     # Step 3: Route products
@@ -348,7 +355,10 @@ def run(page, so_id):
     t0 = time.time()
     if use_efs:
         print("\n--- Step 5: Set Shipment By -> 3PL (EFS) ---")
-        if "NEXT DAY" in sor_shipping.upper() or "OVERNIGHT" in sor_shipping.upper():
+        # Drive the SO Shipment Method off the COMPUTED ship-via (which already factors in the
+        # Required Delivery Date) -- not just sor_shipping. Otherwise a blank shipping-method
+        # field with a 'Next Day' required date sets the SO to Ground (EFS overnight, SO Ground).
+        if "OVERNIGHT" in efs_ship_via.upper():
             set_shipment(page, method="Next Day", shipped_by="3PL - EFS")
         else:
             set_shipment(page, method="Ground", shipped_by="3PL - EFS")
@@ -370,9 +380,9 @@ def run(page, so_id):
             manual_ds_swap(page, efs_products)
     elif use_vunics:
         print("\n--- Step 5: Set Shipment By -> VUnics ---")
-        if "NEXT DAY" in sor_shipping.upper() or "OVERNIGHT" in sor_shipping.upper():
+        if "OVERNIGHT" in efs_ship_via.upper():
             set_shipment(page, method="Next Day", shipped_by="VUnics")
-        elif "FREIGHT" in sor_shipping.upper():
+        elif "FREIGHT" in f"{sor_shipping} {required_raw}".upper():
             set_shipment(page, method="Freight (Skid)", shipped_by="VUnics")
         else:
             set_shipment(page, method="Ground", shipped_by="VUnics")
