@@ -285,6 +285,14 @@ def build_system_rerun_plan(so_data: dict, sor_data: dict, tasks: dict,
         elif location_action_ready:
             blocked.append("Task 9 To Do but customer/location will be created in this run")
             _input_status("Task 9 config", False, "new customer/location; waiting on task 8 location")
+        elif location_task_done:
+            # Location is already provisioned (task 8 Completed) but the End Customer isn't linked
+            # on the SO yet -- e.g. the customer was just added to the dealer record by hand. This
+            # IS work: the chain resolves the already-created customer (dedup-grab), links the End
+            # Customer + location, then uploads config. Mark ACTIONABLE so the run doesn't
+            # short-circuit to "nothing to do" (Matt: a re-run after the dealer add must finish 9).
+            actionable.append("Task 9 To Do -> resolve/link SO End Customer, then upload VAC config files")
+            _input_status("Task 9 config", True, "location provisioned; resolve + link End Customer, then config")
         else:
             blocked.append("Task 9 To Do but End Customer is not linked")
             _input_status("Task 9 config", False, "End Customer not linked")
@@ -307,6 +315,11 @@ def build_system_rerun_plan(so_data: dict, sor_data: dict, tasks: dict,
         if "Portal location is not completed yet" in blocker and location_action_ready:
             continue
         if "customer/location will be created in this run" in blocker and location_action_ready:
+            continue
+        if "End Customer is not linked" in blocker:
+            # The chain resolves the customer (dedup-grab existing / create) and links the End
+            # Customer; if the dealer link is still pending it flags + skips config. It does NOT
+            # need to hard-stop the whole run -- let it proceed and handle it.
             continue
         hard_blocked.append(blocker)
 

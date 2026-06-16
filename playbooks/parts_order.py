@@ -21,6 +21,7 @@ from core.moops import (
     save_so,
     set_shipment,
     action_add_part,
+    action_add_splicers,
     action_set_tag,
 )
 from core.efs import (
@@ -328,10 +329,12 @@ def run(page, so_id):
         use_efs = True
         use_vunics = False
     elif efs_products and non_efs_products:
+        # A non-EFS part can't ship from EFS, so the whole order ships from the warehouse (VUnics)
+        # -- don't split (Matt: "it's VUnics because that cable isn't at EFS").
         use_efs = False
-        use_vunics = False
-        print(f"\n[INFO] Mixed order: {len(efs_products)} EFS + {len(non_efs_products)} non-EFS")
-        print("[INFO] Review shipment routing -- may need split shipment")
+        use_vunics = True
+        print(f"\n[INFO] Mixed order: {len(efs_products)} EFS + {len(non_efs_products)} non-EFS "
+              "-> VUnics (a non-EFS part forces the whole order to the warehouse)")
     else:
         # Default: non-EFS, non-reader, non-Cents → VUnics
         use_efs = False
@@ -395,12 +398,16 @@ def run(page, so_id):
             print("[INFO] No products to ship")
     print(f"  [{time.time() - t0:.1f}s]")
 
-    # Step 6: Missing parts
+    # Step 6: Missing parts -- wire splicers (03-01-43) ALWAYS get added (they stack onto any
+    # existing qty). Reuses the same action_add_splicers the system path uses.
     if missing:
         print(f"\n--- Step 6: Missing parts ({len(missing)}) ---")
         for m in missing:
             print(f"  {m['part_number']:20s} -> {m['associated_part']:15s} qty={m['qty']:5s} {m['description'][:40]}")
-        print("[INFO] Review missing parts -- add manually if needed with --add-part")
+        action_add_splicers(page)
+        other = [m for m in missing if m.get('associated_part') != '03-01-43']
+        if other:
+            print("[INFO] Non-splicer missing parts above -- review/add manually with --add-part.")
 
     # Step 7: Save
     t0 = time.time()

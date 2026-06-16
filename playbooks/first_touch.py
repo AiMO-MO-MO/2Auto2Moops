@@ -21,6 +21,7 @@ from core.moops import (
     decode_vac,
     determine_pinpad_kit,
     read_sale_or_route,
+    read_order_type,
     read_sor_data,
     read_schedule_capacity,
     read_existing_customer_id,
@@ -96,7 +97,13 @@ def read_so(page, so_id):
                   f"touch={d['is_touchscreen']} dispenser={d['needs_card_dispenser']}")
 
     sale_route = read_sale_or_route(page)
-    print(f"Sale/Route: {sale_route or '(not set)'}")
+    order_type = read_order_type(page)
+    # A route is signaled EITHER by the Sale/Route dropdown == 'Route' OR by the Order Type
+    # being a Multi-Housing type (multi-housing IS a route -- hardware only, no provisioning).
+    is_route = (sale_route.lower() == "route") or ("multi housing" in order_type.lower()) \
+        or ("multi-housing" in order_type.lower())
+    print(f"Sale/Route: {sale_route or '(not set)'} | Order Type: {order_type or '(not set)'} "
+          f"-> {'ROUTE' if is_route else 'System'}")
 
     return {
         "tag": tag,
@@ -105,7 +112,8 @@ def read_so(page, so_id):
         "products": products,
         "missing": missing,
         "vac_summary": vac_summary,
-        "is_route": sale_route.lower() == "route",
+        "order_type": order_type,
+        "is_route": is_route,
     }
 
 

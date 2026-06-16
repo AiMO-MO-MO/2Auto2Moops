@@ -12,7 +12,7 @@ Senior database engineer and automation architect. Production-critical system �
 
 **"run log" = READ `run.log`.** When Matt says "run log" (or "check the log"), he means: open `run.log` in this folder and respond based on what's ACTUALLY in it — that file is the bridge to his terminal (he tees output to it). Do NOT interpret "run log" as "log this to memory," and NEVER infer a run's result without reading the file. Each chat is a fresh context and does not auto-watch the file; read it on demand every time he references it.
 
-**Work pace:** Incremental. Don't propose large refactors or build multiple features unprompted. One thing at a time, test it, move on. Don't touch working code unless Matt explicitly asks. Additive changes only. When starting a new session, ask what Matt wants to work on — don't assume.
+**Work pace:** Incremental and focused — one thing at a time. Prefer the smallest correct change and REUSE existing code (one shared path, three flavors) rather than bolting on a parallel branch for one case. **Read the real code, and inspect the live page (DOM), before changing it — never guess at selectors or behavior.** Don't ship a change "to see if it works," and never report success you haven't verified. Confirm before large refactors or new features; don't build multiple features unprompted. When starting a new session, ask what Matt wants to work on.
 
 ## Architecture
 
@@ -44,13 +44,13 @@ card-in-hand / reprint / no-cards all finish in one touch.
 
 ## Order Types & Playbooks
 
-| Type | CLI | Tag Pattern | Assembly Week | ITF |
-|------|-----|------------|--------------|-----|
-| System (Laundromat) | `--first-touch` | "2 VAC07 (Store Name)" | Yes | Yes |
-| Route (Multi-Housing) | `--first-touch` (auto-detect) | "1 VAC03 (Dealer - Location)" | Yes | No |
-| Parts/Readers | `--parts-order` | Descriptive | No | No |
-| Cards Only | `--cards-order` | "5000 Cards (Customer)" | No | No |
-| Card Modify | `--card-modify` | (no tag change) | No | No |
+| Type | Command | Tag Pattern | Assembly Week |
+|------|---------|------------|--------------|
+| System (Laundromat) | `system <id>` | "2 VAC07 (Store Name)" | Yes |
+| Route (Multi-Housing) | `system <id>` (auto-detect) | "1 VAC03 (Store)" | Yes |
+| Parts/Readers | `parts <id>` | Descriptive | No |
+| Cards Only | `cards <id>` | "5000 Cards (Customer)" | No |
+| Card Modify | `m <id>` | (no tag change) | No |
 
 **How to classify:** VACs present → System/Route. KITs/ASSYs only → Parts. CARD-MD-* only → Cards. Sale/Route field distinguishes System vs Route.
 
@@ -75,7 +75,7 @@ Whole kits already in EFS (KIT-DEXTER01, KIT-POS-01, etc.) ship as-is, no expans
 **EFS JS snippet:** When Matt can't re-run the playbook (e.g. other fields already set on the SO), generate the JS snippet directly in chat from the shipping data on the SO page. Matt pastes it into the EFS browser console (F12 → Console → Ctrl+V → Enter). Always include shipping address fields + product qty fills. The `read_shipping_to` output or Shipping To field on the SO has: company, address, city, state, zip, ATTN name, phone.
 
 ### Route differences from System
-No CARD-03-01, no SVC-LAUNDROMAT, no ITF. Task checklist: 1-2 Completed, 3-10 N/A (routes need no VAC config either). Tag = "QTY VACxx, N Readers (Dealer - Location)" — name AND address. Generic cards (CARD-MD-GEN01) under 1000 go with system. Auto-detected from Sale/Route dropdown on SO.
+No CARD-03-01, no SVC-LAUNDROMAT, no customer/location/Stripe/user/config provisioning. Task checklist: 1-2 Completed, 6-10 N/A. A route CAN carry a card design (most don't) — if the SOR has one, `system <id>` runs the SAME `_do_cards` workflow (new design needs no cust id; clone defaults End-Customer to Mitech) and sets card tasks 3/4/5 from the card on the SO via the shared `action_set_system_tasks` detection. Tag = "QTY VACxx, N Readers (Store)". Auto-detected from the Sale/Route dropdown OR Order Type "System - Multi-Housing".
 
 ### Cards-order playbook (`--cards-order`)
 1. Read SO + SOR (card design type, contact, card qty)
@@ -144,36 +144,25 @@ Format: `VACXX-YZ-WM` — XX=cabinet, Y=bill acceptor, Z=pinpad, W=card dispense
 | 3 | Connected with end-customer/dealer | Completed (new card) or N/A |
 | 4 | Card approval received | To Do (new card) or N/A |
 | 5 | Card proofs, PO sent | To Do (any card) or N/A |
-| 6 | Sent SaaS contract | Completed (ITF covers this) |
+| 6 | Sent SaaS contract | To Do (Salesforce — not automated, Matt sends) |
 | 7 | Sent Payment processing contract | To Do |
 | 8 | End-customer and location added to Portal | To Do |
 | 9 | VAC Config files attached to order | To Do |
 | 10 | Created Admin Portal user and emailed Intro email | To Do |
 
-### Route Orders (First Touch)
+### Route Orders
 
 | # | Task | Status |
 |---|------|--------|
 | 1 | Hardware verified | Completed |
 | 2 | End-customer info obtained | Completed |
-| 3-8, 10 | All provisioning | N/A (no ITF for routes) |
-| 9 | VAC Config files | To Do |
+| 3/4/5 | Card tasks | Per SOR card design (Completed/To Do if a card; else N/A) |
+| 6-10 | Provisioning + config | N/A (routes aren't provisioned like a laundromat) |
 
-### Final Touch (`--final-touch`) — RETIRED (ITF-era audit)
-Being replaced by the idempotent `system <id>` re-run (the "look-back" pass), which is task-driven and
-does the work itself instead of opening the ITF form. Kept for reference only; do NOT run it on the
-eliminate-ITF flow (it opens the ITF Jira form and mis-marks card tasks). Historical behavior below.
-Run week before assembly. Reads task checklist, completes what it can, flags the rest.
-| # | Task | Final Touch behavior |
-|---|------|---------------------|
-| 3 | Connected with end-customer | Check SO log for "card design email"; if missing, send now |
-| 4 | Card approval | Check product description — PLACEHOLDER = not approved |
-| 5 | Card PO | If card approved, create PO + PO email + set Purchase State → Ordered |
-| 6 | SaaS contract (ITF) | Open ITF Jira form (reads SOR + internal notes for data) |
-| 7-10 | IT provisioning | Blocked if ITF not done; "waiting" if ITF just sent; "verify in portal" if ITF was done previously |
-
-**Dependencies:** 4→5 (can't PO without approval), 6→7,8,9,10 (can't provision without ITF).
-**Smart reads:** SOR only fetched when tasks 3/5/6 need it. Products always read (card detection).
+### Final Touch (`--final-touch`) — RETIRED
+Replaced by the idempotent `system <id>` re-run (the "look-back" pass), which is task-driven and does the
+work itself. Do NOT run it — it opens the ITF Jira form and mis-marks card tasks. Historical detail in
+`docs/reference.md`.
 
 ## Assembly Week Scheduling
 
@@ -234,7 +223,7 @@ core/provisioning.py      ← Eliminate-ITF fills: create-customer, fill_api_use
 playbooks/first_touch.py  ← System/Route playbook (10 steps; no_itf + dedup_test flags; returns cid)
 playbooks/parts_order.py  ← Parts order playbook (3 fulfillment paths + kit expansion)
 playbooks/cards_order.py  ← Cards-only order playbook
-playbooks/final_touch.py  ← Pre-ship audit: drive all tasks to 100%
+playbooks/final_touch.py  ← RETIRED (ITF-era audit; superseded by `system <id>` look-back)
 playbooks/intake.py       ← Read-only queue scan → board + plan (classify, schedule, dedup)
 ```
 
@@ -317,22 +306,29 @@ Create-customer conventions (dialed in vs Matt's manual version):
 - Stripe = initiate only (click create → close the Stripe popup → refresh → Assign access); never fill
   the merchant application.
 
-**Idempotent-run build order (`docs/idempotent_run.md`):** ✓1 tag+schedule check-or-skip,
-✓ End-Customer-field detection + strong-dedupe confirm+proceed (single match), ✓ task-driven chain
-(run To Do only), ✓ SOR read-once + notes merged, ✓ nav retry, ✓ config after End Customer,
-✓ card type classifier, ✓ cards-order delegates to `_do_cards`. **Next:** (3) dealer-record link
-(new customers must be added to dealer account before End Customer is settable — need `inspect-form`
-on Admin customer page to see sub-customer add UI); (4) location/Stripe/user skip-if-exists detection;
-(5) task-state derivation; (6) finish retiring final-touch.
+**Idempotent-run build order (`docs/idempotent_run.md`):** ✓ tag+schedule check-or-skip,
+✓ End-Customer detection + **dedup-grab** (grab an existing match, create only when truly new — no
+duplicates), ✓ task-driven chain (run To Do only), ✓ **snapshot read-once threaded into the chain**
+(no SO re-read after Create Customer), ✓ nav retry, ✓ config after End Customer, ✓ card classifier,
+✓ cards-order + **route cards** via `_do_cards`, ✓ **dealer-record association** (auto pick→Add Customer
+→Save on the dealer record, then link the End Customer), ✓ **saved-location-id re-read** (use the id you
+saved), ✓ **task 8 marks on a confirmed End-Customer link**. **Next:** skip-if-EXISTS detection for
+location/Stripe/user on already-provisioned existing customers; the SOR→SO change-request reconciler.
 
 **Config file (.cfg) notes:**
-- Downloaded via Playwright `expect_download()` to `vac_configs/SO{id}/` — Chrome security prompt is
-  bypassed at protocol level. Files are NOT in the user's Downloads folder; they're in the project folder.
-- Filename matches MOOPS format: `SO{id}_{name}_{loc}_{VACnn}_{part}.cfg`. For qty>1 rows, `_VAC01_`
-  increments to `_VAC02_`, etc. KioskName patched to match the sequential number.
-- Upload via `set_input_files` on `#uploadFiles` + form-submit click. Verified by checking filename
-  appears in page content after upload.
+- Downloaded via Playwright `expect_download()` to `vac_configs/SO{id}/` (project folder, not Downloads).
+- Filename: `SO{id}_{name}_{loc}_{VACnn}_{part}.cfg`. MOOPS's download already carries a `_VACnn_` token;
+  `download_vac_configs` NORMALIZES that token to the running unit number — works for distinct VAC types
+  AND qty>1 of the same type, and does NOT double-append (the old `dest==orig and n>1` test tacked on an
+  extra `_VAC02`). KioskName patched per unit.
+- **Upload via the page's own "Upload Files" button** (`#fileTrigger`) through the file chooser — NOT
+  `set_input_files` on the hidden input (didn't trigger MOOPS's uploader → 0 files) and NOT a form-submit
+  (the whole-order native POST threw the "submission error"). Then Save the SO; the .cfg's persist on the Save.
+- Verify on the SAME page after Save (NO navigation): poll `read_config_file_resources` a few times for the
+  File Resources `<a download>` rows to repaint, then mark task 9. (It reads the download links, so spaces
+  in the customer name are fine.)
 - **MUST have End Customer set first** — config is skipped with [FLAG] if End Customer not linked.
+- No "already-attached" guard yet — don't re-run config on an SO that already has its .cfg's (it'd duplicate).
 
 **Stripe notes:**
 - `open_stripe`: 20s timeout on Payment Processing link + reload+retry if LP sidebar slow after location save.
@@ -343,12 +339,16 @@ on Admin customer page to see sub-customer add UI); (4) location/Stripe/user ski
 None. Filters `available` to future-only before taking min.
 
 **Open / next:**
-- **Dealer-record link** — new customers need to be added to dealer's Admin account before End Customer
-  is settable. Need `inspect-form https://admintools.mitechisys.com/customers/{dealer_id}` to see
-  sub-customer add UI. Existing customers already linked; new customers are not.
-- **Task 6 (SaaS contract) = Salesforce.** Not in the Admin/LP flow; the run leaves it To Do.
-- **End-Customer search-select DOM** — `set_so_end_customer` types cust id + location, clicks matching row.
-- Still queued: >5000 card-shipping line, rules engine, parts auto-pricing, first-touch money-guard.
+- **Commit** the accumulated `optimize-system-rerun` working tree + drop the stale `stash@{0}`, then keep
+  these docs in sync with the code.
+- **Missing-parts over-add on combo VACs** — a VAC with an integrated pinpad (e.g. VAC03 combo) shouldn't
+  get a separate pinpad kit/attachment added; the missing-parts step is too eager. (Open.)
+- **LaundroPortal location-index phantom row** — `next_location_id` reads `0100001` for a zero-location
+  customer, so the suggestion is off; the saved-id re-read + MOOPS's duplicate-id block are the safety net. (Open.)
+- **SOR→SO change-request reconciler** — read-only, suggest-only; parse the SOR change-log "Added:" items,
+  confirm against the SO (target models live in the description). See memory `sor-so-change-request-reconcile`.
+- **Task 6 (SaaS) = Salesforce** — not in the Admin/LP flow; the run leaves it To Do.
+- Still queued: >5000 card-shipping line, rules engine, parts auto-pricing, money-guard.
 
 **Dev-env note:** the OneDrive mount serves the sandbox **stale/truncated** copies of just-edited files,
 so `py_compile` in the workspace often fails on unchanged lines — the file tools see the true file. Rely

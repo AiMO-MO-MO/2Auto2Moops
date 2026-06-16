@@ -136,6 +136,22 @@ def read_sale_or_route(page: Page) -> str:
     return ""
 
 
+def read_order_type(page: Page) -> str:
+    """Read the Order Type dropdown (select[name='sales_type_id']) selected label, e.g.
+    'System - Laundromat', 'System - Multi Housing', 'Parts', 'Cards Only'. Multi-Housing is a
+    route (only hardware is done; no provisioning). Returns '' if not found."""
+    try:
+        sel = page.locator('select[name="sales_type_id"]')
+        if sel.count() == 0:
+            return ""
+        opt = sel.first.locator('option:checked')
+        if opt.count() > 0:
+            return (opt.first.inner_text() or "").strip()
+        return (sel.first.input_value() or "").strip()
+    except Exception:
+        return ""
+
+
 def read_tag(page: Page) -> str:
     """Read the current Tag field value."""
     try:
@@ -1456,9 +1472,22 @@ def open_card_design_email(page: Page, card_part_number: str,
         print(f"[ERROR] Could not open Card Design Email: {e}")
         return
 
-    # Step 2: KEEP the CC field. The card DESIGN email must retain its CC (e.g. graphics@);
-    # only the PO email clears CC. Clearing it here is the regression Matt flagged.
+    # Step 2: Clear ONLY the header CC field -- email_carbon_copy, the CC that sits between
+    # To and BCC (confirmed from the modal DOM: 0=To, 1=CC, 2=BCC, 4=email_body). Clear it by
+    # exact name only -- NO nth()/label guessing, so the message body (email_body) and the CC
+    # text inside it are never touched.
     modal = page.locator('#design-email-modal')
+    try:
+        cc = modal.locator('input[name="email_carbon_copy"]')
+        if cc.count() == 0:
+            cc = page.locator('input[name="email_carbon_copy"]')
+        if cc.count() > 0:
+            cc.first.fill("")
+            print("[ACTION] Header CC (email_carbon_copy) cleared")
+        else:
+            print("[WARNING] email_carbon_copy field not found -- CC left as-is")
+    except Exception as e:
+        print(f"[WARNING] Could not clear header CC: {e}")
 
     # Step 3: Update message body with correct card part number and contact info
     try:
@@ -2128,63 +2157,50 @@ def action_set_system_tasks(page: Page, is_route: bool = False) -> None:
       3: Connected via (card email)-> Completed (new card) or N/A (no card)
       4: Card approval received    -> To Do (new card) or N/A
       5: Final card proofs, PO     -> To Do (any card) or N/A
-      6: SaaS contract             -> Completed (ITF sent)
+      6: SaaS contract             -> To Do (Salesforce, not automated)
       7-10: Provisioning steps     -> To Do
 
     Route orders:
       1-2: Completed
       3-10: N/A (no ITF, no provisioning)
     """
-    if is_route:
-        # Routes need no VAC config either -- everything past 1-2 is N/A.
-        statuses = {
-            1: "Completed",
-            2: "Completed",
-            3: "N/A",
-            4: "N/A",
-            5: "N/A",
-            6: "N/A",
-            7: "N/A",
-            8: "N/A",
-            9: "N/A",
-            10: "N/A",
-        }
-        print(f"\n[ACTION] Setting route order task checklist:")
-    else:
-        has_card = False
-        has_new_card = False
-        rows = page.locator('tr[id^="existing_part_order_"], tr[id^="new_part_order_"]').all()
-        for row in rows:
-            try:
-                pn = row.locator('th[scope="row"] a')
-                if pn.count() > 0:
-                    part = pn.first.inner_text().strip()
-                    if part.startswith("CARD-MD-") and part != "CARD-03-01":
-                        has_card = True
-                        row_text = row.inner_text()
-                        if "PLACEHOLDER" in row_text.upper():
-                            has_new_card = True
-            except Exception:
-                continue
+    # Detect card state from the product table -- SAME for route and system. A route CAN carry a
+    # card design (most don't); when it does, its card tasks follow the same rule as a system order.
+    has_card = False
+    has_new_card = False
+    rows = page.locator('tr[id^="existing_part_order_"], tr[id^="new_part_order_"]').all()
+    for row in rows:
+        try:
+            pn = row.locator('th[scope="row"] a')
+            if pn.count() > 0:
+                part = pn.first.inner_text().strip()
+                if part.startswith("CARD-MD-") and part != "CARD-03-01":
+                    has_card = True
+                    if "PLACEHOLDER" in row.inner_text().upper():
+                        has_new_card = True
+        except Exception:
+            continue
 
-        # Card task logic:
-        #   New design (PLACEHOLDER in desc) → 3=Completed (email sent), 4=To Do (waiting proof), 5=To Do (PO)
-        #   Existing card (reprint, no placeholder) → 3=N/A, 4=N/A, 5=To Do (PO still needed)
-        #   No cards on order → 3=N/A, 4=N/A, 5=N/A
-        statuses = {
-            1: "Completed",
-            2: "Completed",
-            3: "Completed" if has_new_card else "N/A",
-            4: "To Do" if has_new_card else "N/A",
-            5: "To Do" if has_card else "N/A",
-            6: "Completed",
-            7: "To Do",
-            8: "To Do",
-            9: "To Do",
-            10: "To Do",
-        }
-        print(f"\n[ACTION] Setting system order task checklist:")
-        print(f"  Card detected: has_card={has_card}, has_new_card={has_new_card}")
+    # Card task logic (shared by both paths):
+    #   New design (PLACEHOLDER) → 3=Completed (email sent), 4=To Do (proof), 5=To Do (PO)
+    #   Existing card (reprint)  → 3=N/A, 4=N/A, 5=To Do (PO still needed)
+    #   No card                  → 3/4/5 N/A
+    card_tasks = {
+        3: "Completed" if has_new_card else "N/A",
+        4: "To Do" if has_new_card else "N/A",
+        5: "To Do" if has_card else "N/A",
+    }
+    if is_route:
+        # Route / multi-housing: hardware (+ card if present) only -- no SaaS/payment/portal/config.
+        statuses = {1: "Completed", 2: "Completed", **card_tasks,
+                    6: "N/A", 7: "N/A", 8: "N/A", 9: "N/A", 10: "N/A"}
+        print("\n[ACTION] Setting route order task checklist:")
+    else:
+        # System: SaaS (6 = Salesforce, not automated) + provisioning (7-10) all To Do.
+        statuses = {1: "Completed", 2: "Completed", **card_tasks,
+                    6: "To Do", 7: "To Do", 8: "To Do", 9: "To Do", 10: "To Do"}
+        print("\n[ACTION] Setting system order task checklist:")
+    print(f"  Card detected: has_card={has_card}, has_new_card={has_new_card}")
 
     for num, status in statuses.items():
         print(f"  Task {num:2d}: {status}")
@@ -2247,9 +2263,15 @@ def download_vac_configs(page: Page, so_id, out_dir) -> list:
             # Keep the MOOPS-generated filename format, just increment the _VAC{nn}_ part.
             # e.g. SO19885_Parkway Washateria_0100004_VAC01_VAC07-62-20.cfg
             #   -> SO19885_Parkway Washateria_0100004_VAC02_VAC07-62-20.cfg for unit 2
-            dest_name = re.sub(r'_VAC\d+_', f'_VAC{n:02d}_', orig_name, count=1)
-            if dest_name == orig_name and n > 1:
-                # filename didn't have _VACnn_ pattern -- fall back to adding suffix
+            # MOOPS names each downloaded VAC with a _VACnn_ token already. If it's there,
+            # NORMALIZE that token to the running unit number (count=1) -- nothing else. Only when
+            # there's genuinely no _VACnn_ token do we append a suffix. (The old test
+            # `dest_name == orig_name and n > 1` wrongly fired when the token already equalled the
+            # running number -- e.g. a 2nd distinct VAC downloaded as _VAC02_ -- and tacked on an
+            # extra _VAC02, e.g. ..._VAC02_VAC04-40-20_VAC02.cfg.)
+            if re.search(r'_VAC\d+_', orig_name):
+                dest_name = re.sub(r'_VAC\d+_', f'_VAC{n:02d}_', orig_name, count=1)
+            else:
                 base, ext = os.path.splitext(orig_name)
                 dest_name = f"{base}_VAC{n:02d}{ext}"
             dest = os.path.join(out_dir, dest_name)
@@ -2284,84 +2306,64 @@ def download_vac_configs(page: Page, so_id, out_dir) -> list:
 
 @timed
 def upload_files_to_so(page: Page, paths: list) -> bool:
-    """Upload files to the SO's File Resources (id='uploadFiles'). Sets the file input
-    and clicks the upload/submit button if present. Verifies the filenames appear in the
-    File Resources section after upload. Returns True only if confirmed on page."""
+    """ADD files to the SO's File Resources by driving the page's own 'Upload Files' button
+    (#fileTrigger) through the file chooser -- the same action a human does. That fires MOOPS's
+    upload handler (an AJAX upload of just the files), which is why it works where set_input_files
+    on the hidden input did NOT, and why it avoids the whole-order native POST that threw the
+    'submission error'. Caller then Saves + verifies. Returns True if files were handed off."""
     import os
     if not paths:
         return False
+    names = [os.path.basename(p) for p in paths]
+    trigger = page.locator('#fileTrigger')
+    if trigger.count() > 0:
+        try:
+            with page.expect_file_chooser(timeout=8000) as fc_info:
+                trigger.first.click()
+            fc_info.value.set_files(paths)
+            time.sleep(2)  # let MOOPS's upload handler run
+            print(f"[CONFIG] Added {len(names)} file(s) via the 'Upload Files' button.")
+            return True
+        except Exception as e:
+            print(f"[CONFIG] 'Upload Files' chooser flow failed ({e}) -- falling back to the hidden input.")
+    # Fallback: set the hidden input directly (older page versions).
     inp = page.locator('#uploadFiles')
     if inp.count() == 0:
-        print("[CONFIG] File Resources input (#uploadFiles) not found -- attach the .cfg files "
-              "manually.")
+        print("[CONFIG] No upload control found -- attach the .cfg files manually.")
         return False
-    names = [os.path.basename(p) for p in paths]
     try:
         inp.set_input_files(paths)
         time.sleep(1)
+        print(f"[CONFIG] Set {len(names)} file(s) on #uploadFiles (fallback).")
     except Exception as e:
         print(f"[CONFIG] Could not set file input ({e}) -- attach manually from {os.path.dirname(paths[0])}.")
         return False
-
-    # Click the Upload / Submit button associated with the file input (if one exists).
-    # Common patterns: a button near #uploadFiles, or an input[type=submit] in the same form.
-    uploaded = False
-    try:
-        btn = page.evaluate("""() => {
-            const inp = document.querySelector('#uploadFiles');
-            if (!inp) return null;
-            const form = inp.closest('form');
-            if (form) {
-                const sub = form.querySelector('button[type=submit], input[type=submit], button:not([type=button])');
-                if (sub) { sub.click(); return 'form-submit'; }
-            }
-            // Fallback: any visible button near the input containing Upload/Attach text
-            for (const btn of document.querySelectorAll('button, input[type=submit]')) {
-                if (/upload|attach|save/i.test(btn.innerText || btn.value || '')) {
-                    btn.click(); return 'text-match';
-                }
-            }
-            return null;
-        }""")
-        if btn:
-            print(f"[CONFIG] Clicked upload button (via {btn}).")
-        time.sleep(3)
-    except Exception as e:
-        print(f"[CONFIG] Could not click upload button ({e}) -- may still work via change event.")
-
-    # Verify: check if the filenames now appear in the File Resources section.
-    try:
-        page_text = page.content()
-        found = [n for n in names if n in page_text]
-        missing = [n for n in names if n not in page_text]
-        if found:
-            print(f"[CONFIG] Confirmed in File Resources: {', '.join(found)}")
-            uploaded = True
-        if missing:
-            print(f"[CONFIG] NOT confirmed on page: {', '.join(missing)} -- verify manually or re-attach.")
-    except Exception:
-        print(f"[CONFIG] Could not verify upload -- check File Resources on the SO manually.")
-        uploaded = False  # do NOT assume success when we can't confirm
-
-    return uploaded
+    return True
 
 
 def read_config_file_resources(page: Page) -> list:
-    """Return unique .cfg filenames currently visible in the SO File Resources area."""
+    """Return unique .cfg filenames currently in the SO File Resources area. Reads the actual
+    download links first (<a download="...cfg"> / <a href="/files/..">) -- authoritative and works
+    even when the filename has spaces -- then falls back to any .cfg token in the page text."""
     try:
         names = page.evaluate(r"""() => {
-            const text = document.body ? (document.body.innerText || '') : '';
-            const matches = text.match(/[^\s"'<>]+\.cfg\b/gi) || [];
             const seen = new Set();
             const out = [];
-            for (const raw of matches) {
-                const name = raw.replace(/[),.;:]+$/, '');
+            const add = (raw) => {
+                if (!raw) return;
+                const name = String(raw).trim().replace(/[),.;:]+$/, '');
+                if (!/\.cfg$/i.test(name)) return;
                 const key = name.toLowerCase();
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    out.push(name);
-                }
+                if (!seen.has(key)) { seen.add(key); out.push(name); }
+            };
+            // Authoritative: File Resources download links.
+            for (const a of document.querySelectorAll('a[download], a[href*="/files/"]')) {
+                add(a.getAttribute('download') || '');
+                add((a.textContent || '').trim());
             }
+            // Fallback: any .cfg token in the page text (no-space filenames).
+            const text = document.body ? (document.body.innerText || '') : '';
+            for (const m of (text.match(/[^\s"'<>]+\.cfg\b/gi) || [])) add(m);
             return out;
         }""")
         print(f"[READ] Config files visible on SO: {len(names or [])}")
@@ -2821,7 +2823,10 @@ def _pick_validity_result(page: Page, token: str) -> bool:
     clickable rows ('0100002 - 2930 Sacramento Street'); the container class isn't
     pinned, so match by visible text across the common row tags."""
     page.wait_for_timeout(1200)  # let the AJAX results render
-    for tag in ("li", "a", "tr", "div[role='option']", "div"):
+    # The validity dropdown renders each result as a <button class="dropdown-item"> (confirmed live
+    # on the MOOPS customer page). Try that FIRST -- otherwise a generic <div> wrapper gets clicked
+    # and the selection never binds, which silently broke the dealer End-Customer add.
+    for tag in ("button.dropdown-item", "li", "a", "tr", "div[role='option']", "div"):
         rows = page.locator(tag).filter(has_text=token)
         for i in range(min(rows.count(), 8)):
             row = rows.nth(i)
@@ -2854,6 +2859,106 @@ def _location_in_ownership_table(page: Page, location_id: str) -> bool:
                 return True
     except Exception:
         pass
+    return False
+
+
+def read_so_dealer_id(page: Page) -> str:
+    """The dealer's MOOPS customer_id from the SO's Customer field link (top of the SO). The
+    dealer is the account the SO was placed under, and its customer record holds the End
+    Customer associations (a dealer can only order for end customers on their record). Returns
+    '' if no /customer?customer_id= link is found on the page."""
+    try:
+        return page.evaluate(r"""() => {
+            for (const a of document.querySelectorAll('a[href*="customer_id="]')) {
+                const m = (a.getAttribute('href') || '').match(/customer(?:\.php)?\?customer_id=(\d+)/);
+                if (m) return m[1];
+            }
+            return '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def fill_dealer_end_customer_association(page: Page, dealer_customer_id, cust_id: str) -> bool:
+    """On the DEALER's MOOPS customer page, add `cust_id` as an End Customer association so it
+    becomes selectable as the SO's End Customer. The End-Customer search
+    (#validity_customer-search) is a finicky typeahead: fill it, pick the row, click the
+    'Add Customer' button next to it (just picking does NOT add it), THEN Save (#change).
+    Auto-Adds + auto-Saves, then VERIFIES on the reloaded page. Returns True only if the
+    association actually committed (cust_id present on the reloaded dealer record)."""
+    url = f"{MOOPS_BASE}/customer?customer_id={dealer_customer_id}"
+    print(f"[ASSOC] Dealer account: {url}")
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    search = page.locator('#validity_customer-search')
+    if search.count() == 0:
+        print("[ASSOC] End-Customer search (#validity_customer-search) not on the dealer page "
+              "-- add the association manually.")
+        return False
+    try:
+        search.first.click()
+        search.first.fill(cust_id)
+    except Exception as e:
+        print(f"[ASSOC] Could not fill the End-Customer search ({e}) -- add manually.")
+        return False
+    if not _pick_validity_result(page, cust_id):
+        print(f"[ASSOC] Could not pick {cust_id} in the End-Customer search -- add it manually.")
+        return False
+    # Click 'Add Customer' to add the picked result to the associations list. Target it by its
+    # STABLE CLASS (button.btn.btn-primary.mr-sm-2) -- the button has no text node, so matching by
+    # the words "Add Customer" never found it (confirmed live). Picking alone does NOT add the row;
+    # the Add button must fire and the row must appear BEFORE the save.
+    add_clicked = page.evaluate("""() => {
+        const btn = document.querySelector('button.btn.btn-primary.mr-sm-2');
+        if (btn) { btn.click(); return true; }
+        return false;
+    }""")
+    if not add_clicked:
+        print("[ASSOC] Add Customer button (button.btn.btn-primary.mr-sm-2) not found -- add manually.")
+        return False
+
+    # Confirm the row actually landed in the associations table before saving. The Add is a
+    # client-side Angular insert; saving before it commits loses it.
+    added_row = False
+    for _ in range(6):
+        added_row = page.evaluate(
+            "(cid) => [...document.querySelectorAll('#customer_details_form table tbody tr')]"
+            ".some(r => (r.textContent || '').includes(cid))",
+            cust_id,
+        )
+        if added_row:
+            break
+        page.wait_for_timeout(500)
+    if not added_row:
+        print(f"[ASSOC] 'Add Customer' did not add a row for {cust_id} -- not saving; add it manually.")
+        return False
+    print(f"[ASSOC] {cust_id} added to the associations table -- saving (#change).")
+
+    # Record it: click the green Save (#change) automatically -- no human pause. The page
+    # reloads on save, so we sleep rather than wait_for_timeout (context is destroyed).
+    page.evaluate("""() => {
+        const byId = document.querySelector('#change');
+        if (byId) { byId.click(); return true; }
+        const els = document.querySelectorAll('button, a, input[type="submit"]');
+        for (const el of els) {
+            const txt = (el.textContent || el.value || '').trim();
+            if (txt === 'Save' || txt.startsWith('Save')) { el.click(); return true; }
+        }
+        return false;
+    }""")
+    time.sleep(3)
+
+    # Verify on the RELOADED dealer page (the only trustworthy signal). cust_id is brand-new under
+    # this dealer, so if it shows anywhere on the reloaded record the association committed; if not,
+    # the Add didn't register -- report that truthfully instead of a false "Saved".
+    try:
+        present = page.evaluate("(cid) => (document.body ? document.body.innerText : '').includes(cid)", cust_id)
+    except Exception:
+        present = False
+    if present:
+        print(f"[ASSOC] Confirmed -- {cust_id} is recorded on dealer {dealer_customer_id}'s End Customer associations.")
+        return True
+    print(f"[ASSOC] {cust_id} did NOT land on the dealer's associations after Add + Save -- add it "
+          "manually (pick -> Add Customer -> Save) on the dealer record, then re-run.")
     return False
 
 

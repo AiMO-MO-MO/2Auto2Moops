@@ -458,6 +458,25 @@ def read_portal_location(page: Page, location_key: str) -> dict:
     return data
 
 
+def read_saved_location_id(page: Page, location_key: str) -> str:
+    """Read the ACTUAL saved Location ID (the 7-digit id, e.g. 0100005) from the location's
+    EDIT form -- this is the field the human may have changed at the save pause to dodge a
+    collision. Mirrors the card-part re-read (lesson #12): trust what was saved, not what we
+    generated, so the End Customer link + config use the right location. Returns '' on failure.
+
+    LocationPanel.php (the read-only panel) does NOT expose the id as a labeled input, which is
+    why read_portal_location() comes back blank -- so read it from EditLocation.php instead."""
+    url = f"{PORTAL}/EditLocation.php?Location_Key={location_key}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        val = (page.locator("#location_id").input_value(timeout=8000) or "").strip()
+        print(f"[READ] Saved Location ID (key {location_key}): {val or '(empty)'}")
+        return val
+    except Exception as e:
+        print(f"[READ] Could not read saved Location ID (key {location_key}): {e}")
+        return ""
+
+
 def read_portal_payment(page: Page, location_key: str) -> dict:
     """
     Read payment processing data from LaundroPortal.

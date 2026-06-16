@@ -214,9 +214,10 @@ def fill_create_customer(page, data, cust_id="", preview=False):
     print("        NOTHING was submitted.")
 
 
-def fill_api_user(page, cust_id=""):
+def fill_api_user(page, cust_id="", is_fortis=False):
     """Post-save Admin finalize (the 'save again' pass). Per Matt's finalize:
-      1. Check 'Payment Processing Reports Stripe' under Extended Features.
+      1. Check 'Payment Processing Reports Stripe' under Extended Features -- UNLESS the order
+         is Fortis/EBT (those process on Fortis, not Stripe, so the flag must NOT be set).
       2. Create the API user named like the ROOT login but with 'Admin' -> 'API'
          (PureWashAdmin -> PureWashAPI), access = POS, password auto-generated.
     Reads Root_Login from the page so it tracks any manual rename. FILL ONLY --
@@ -244,22 +245,26 @@ def fill_api_user(page, cust_id=""):
     # API user name: ROOT login with 'Admin' -> 'API'  (PureWashAdmin -> PureWashAPI)
     api_name = (root[:-5] + "API") if root.lower().endswith("admin") else (root + "API")
 
-    # (1) Enable 'Payment Processing Reports Stripe'. The checkbox names are opaque
-    # (extended_features[NN]), so match on the rendered label text and click it.
-    stripe_ok = page.evaluate(
-        """() => {
-            const t = 'payment processing reports stripe';
-            for (const l of document.querySelectorAll('label')) {
-                if ((l.innerText || '').toLowerCase().includes(t)) {
-                    const cb = l.querySelector('input[type="checkbox"]')
-                            || (l.htmlFor ? document.getElementById(l.htmlFor) : null);
-                    if (cb && cb.type === 'checkbox') { if (!cb.checked) cb.click(); return true; }
+    # (1) Enable 'Payment Processing Reports Stripe' -- but NOT for Fortis/EBT customers. They
+    # process on Fortis, not Stripe, so the Stripe reporting feature must not be set on the cust id.
+    if is_fortis:
+        print("  Stripe payment reporting: SKIPPED (Fortis/EBT processor -- not a Stripe customer)")
+    else:
+        # The checkbox names are opaque (extended_features[NN]), so match on the rendered label.
+        stripe_ok = page.evaluate(
+            """() => {
+                const t = 'payment processing reports stripe';
+                for (const l of document.querySelectorAll('label')) {
+                    if ((l.innerText || '').toLowerCase().includes(t)) {
+                        const cb = l.querySelector('input[type="checkbox"]')
+                                || (l.htmlFor ? document.getElementById(l.htmlFor) : null);
+                        if (cb && cb.type === 'checkbox') { if (!cb.checked) cb.click(); return true; }
+                    }
                 }
-            }
-            return false;
-        }"""
-    )
-    print(f"  Stripe payment reporting: {'checked' if stripe_ok else 'NOT FOUND -- tick manually'}")
+                return false;
+            }"""
+        )
+        print(f"  Stripe payment reporting: {'checked' if stripe_ok else 'NOT FOUND -- tick manually'}")
 
     # (2) API user (POS). Skip if one with this name already exists on the account.
     existing = page.evaluate(
@@ -747,25 +752,40 @@ def open_stripe(page, cust_id, location_key):
                 print(f"  [WARN] Couldn't navigate back to Payment Processing ({e}). "
                       "Run `stripe {cust_id} {location_key}` after settling.")
 
-    # 2) Account Access -> grant the portal user (the 'select a user to grant access'
-    # dropdown + the 'Assign' button). Lower-risk, repeatable. Guard the probe: if the page is
-    # still mid-navigation the evaluate can throw 'context destroyed' -- don't kill the run.
-    try:
-        ua = page.evaluate(
-            """() => {
-                const sels = [...document.querySelectorAll('select')];
-                const us = sels.find(s => [...s.options].some(o => /select a user to grant access/i.test(o.text)));
-                if (!us) return {found: false};
-                const real = [...us.options].find(o => o.text.trim() && !/select a user to grant access/i.test(o.text));
-                return {found: true, value: real ? real.value : null, label: real ? real.text.trim() : ''};
-            }"""
-        )
-    except Exception as e:
-        print(f"  [INFO] Couldn't read Account Access control ({e}) -- grant access manually "
-              "(select the user -> Assign).")
-        ua = {"found": False}
+    # 2) Account Access -> grant the portal user (the 'select a user to grant access' dropdown +
+    # 'Assign'). The Account Access control only appears AFTER the new merchant has registered --
+    # creating it opens a separate Stripe tab and the LP page needs a refresh, which can lag a few
+    # seconds (Matt: assign access AFTER the refresh from creating the Stripe account). So refresh
+    # + re-check a few times before giving up.
+    access_url = page.url
+    ACCESS_JS = """() => {
+        const sels = [...document.querySelectorAll('select')];
+        const us = sels.find(s => [...s.options].some(o => /select a user to grant access/i.test(o.text)));
+        if (!us) return {found: false};
+        const real = [...us.options].find(o => o.text.trim() && !/select a user to grant access/i.test(o.text));
+        return {found: true, value: real ? real.value : null, label: real ? real.text.trim() : ''};
+    }"""
+    ua = {"found": False}
+    for attempt in range(4):
+        try:
+            ua = page.evaluate(ACCESS_JS)
+        except Exception as e:
+            print(f"  [INFO] Couldn't read Account Access control ({e}) -- will refresh and retry.")
+            ua = {"found": False}
+        if ua.get("found"):
+            break
+        if attempt < 3:
+            print(f"  Account Access not visible yet (merchant still registering) -- refresh {attempt + 1}/3 ...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2500)
+                if "PaymentProcessing" not in (page.url or "") and access_url:
+                    page.goto(access_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(1500)
+            except Exception:
+                pass
     if not ua.get("found"):
-        print("  [INFO] Account Access control not found -- grant access manually.")
+        print("  [INFO] Account Access control not found after refreshes -- grant access manually.")
     elif not ua.get("value"):
         print("  Account Access: no user available to grant (already granted, or no portal user yet).")
     else:
@@ -794,6 +814,16 @@ def open_stripe(page, cust_id, location_key):
                 print(f"  Assigned {ua['label']!r} -- could not re-read dropdown to verify (check manually).")
         except Exception as e:
             print(f"  [WARN] Could not grant access ({e}) -- do it manually (select user -> Assign).")
+
+    # Pause for the human whenever the Account Access control is present: confirm the auto-grant
+    # actually saved and assign any ADDITIONAL users (multi-user accounts like SBL Ventures often
+    # need more than one). The chain waits here -- nothing proceeds until you're done.
+    if ua.get("found"):
+        try:
+            input("\n  [CONFIRM] Bank access -- verify the grant above saved, and assign any more "
+                  "users now (select a user -> Assign). Press Enter when done...")
+        except (EOFError, KeyboardInterrupt):
+            print("  [STRIPE] Continuing without further access changes.")
 
     print("\n[STRIPE] Done. Verify the merchant account + Account Access on the page. The Stripe")
     print("         application/bank details are completed by Cents/the customer -- not here.")
@@ -918,11 +948,15 @@ def next_location_id(page, cust_id, shared=True, from_current_page=False):
     if not from_current_page:
         page.goto(f"{ADMIN_BASE}/customers/{cust_id}", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(1200)
+    # Match the 7-digit id ANYWHERE in the text, not just when it's the whole cell:
+    # In-Development rows render the id with a tag (e.g. '0100003 [In Development]'), so an
+    # anchored ^...$ match misses them and only the clean active row is counted. (Matt: those
+    # still need to count as locations.)
     ids = page.evaluate(
         r"""() => { const s = new Set();
             document.querySelectorAll('option, td, th, span').forEach(e => {
-                const m = (e.textContent || '').trim().match(/^0[12]\d{5}$/);
-                if (m) s.add(m[0]); });
+                const ms = (e.textContent || '').match(/\b0[12]\d{5}\b/g);
+                if (ms) ms.forEach(m => s.add(m)); });
             return [...s]; }"""
     )
     series = "01" if shared else "02"

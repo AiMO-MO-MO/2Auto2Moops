@@ -811,6 +811,31 @@ def _do_system(page, so_id, assembly_week=None, dedup_test=True):
         print("[SYSTEM] Use targeted commands or fix the missing inputs, then re-run snapshot/system.")
         return
 
+    # Route / multi-housing: hardware + tag + schedule ONLY. Tasks 1-2 Completed, 3-10 N/A. No
+    # customer/location/Stripe/user/config provisioning -- multi-housing isn't provisioned like a
+    # laundromat. (Route is signaled by Sale/Route='Route' OR Order Type 'System - Multi Housing'.)
+    if plan.get("_snapshot", {}).get("so_data", {}).get("is_route"):
+        from core.moops import action_set_system_tasks, save_so
+        sor_data = plan.get("_snapshot", {}).get("sor_data", {}) or {}
+        print("\n[SYSTEM] Route / multi-housing order -- hardware + tag + schedule, no "
+              "customer/location/Stripe/user/config provisioning (cards only if the SOR has one).")
+        _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=assembly_week)
+
+        # A route can carry a card design (most don't). Run the SAME card workflow as a system order
+        # -- a new design needs no cust id (clone defaults End-Customer to Mitech). The card TASK
+        # states are then derived by action_set_system_tasks from the card now on the SO (same
+        # detection as system orders); routes only N/A the provisioning tasks (6-10).
+        if _card_type(sor_data.get("card_design_type", "")) != "none":
+            print("\n[SYSTEM] Route SOR has a card design -- processing the card (no provisioning).")
+            _do_cards(page, so_id, "", sor=sor_data)
+
+        navigate_to_so(page, so_id)
+        action_set_system_tasks(page, is_route=True)
+        save_so(page, accept_sor=False, clear_customer_location_blocker=False)
+        print("[SYSTEM] Route order complete -- hardware verified + tasks set. "
+              "Remaining: Work State -> Placed -> Accept SOR.")
+        return
+
     if plan.get("effective_customer_id"):
         snap = plan.get("_snapshot", {})
         end_customer = snap.get("end_customer", {})
@@ -832,19 +857,66 @@ def _do_system(page, so_id, assembly_week=None, dedup_test=True):
             sor=snap.get("sor_data", {}),
             pre_done=pre_done,
             force_config=bool(plan.get("force_config")),
+            tasks=snap.get("tasks"),
+            vac_seats=_vac_seats_from_snapshot(snap),
         )
-        _print_system_write_summary(result)
+        _print_system_write_summary(result, plan)
         return
 
-    # No effective customer id -> NEW customer. SAME snapshot-driven path as the existing
-    # case: setup (tag/week/parts) -> create the customer from the snapshot -> provision
-    # chain. The ONLY difference from the existing branch is the create step. No re-read of
-    # the SO/SOR, no legacy first_touch flow.
+    # No End Customer linked on the SO. RESOLVE the customer before doing anything -- it may
+    # already exist (created on a prior pass of THIS order, or a real customer not yet linked
+    # to the dealer). Dedup against Admin: GRAB a strong match; only CREATE when there is
+    # genuinely no match. This is one resolution feeding the same chain -- not a separate
+    # "new customer" workflow.
     snap = plan.get("_snapshot", {})
     so_data = snap.get("so_data", {})
     sor_data = snap.get("sor_data", {})
-    print("\n[SYSTEM] New customer -- snapshot-driven setup + create (no re-read, no legacy flow).")
+    order = {
+        "customer_name": sor_data.get("location_name", "") or so_data.get("customer_name", ""),
+        "contact_name": sor_data.get("contact_name", ""),
+        "contact_email": sor_data.get("contact_email", ""),
+        "contact_phone": sor_data.get("contact_phone", ""),
+    }
+    matched_id = matched_name = ""
+    try:
+        customers = portal.scrape_admin_customers(page, use_cache=True)
+        res = dedup.match_customer(order, customers)
+        strong = [m for m in res.get("matches", []) if m.get("strength") == "strong"]
+        if len(strong) == 1:
+            matched_id = strong[0].get("cust_id", "")
+            matched_name = strong[0].get("name", "")
+            print(f"\n[SYSTEM] Customer already exists -- strong dedup match {matched_id} "
+                  f"({matched_name}) on {strong[0].get('signal','')}. Grabbing it, NOT creating.")
+        elif len(strong) > 1:
+            print("\n[SYSTEM] Multiple strong dedup matches -- ambiguous; not creating or guessing:")
+            for m in strong:
+                print(f"   {m.get('cust_id','?')} {m.get('name','')}  "
+                      f"({m.get('signal','')} '{m.get('detail','')}')")
+            print("[SYSTEM] Resolve the customer manually, set the End Customer, then re-run.")
+            return
+    except Exception as e:
+        print(f"\n[SYSTEM] Dedup check failed ({e}) -- VERIFY there is no existing customer "
+              "before creating.")
+
+    # Setup (tag/week/parts) runs the same either way.
     pre_done = _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=assembly_week)
+
+    if matched_id:
+        # Existing customer found by dedup -> grab it and run the task-driven chain (no create,
+        # no duplicate). The chain links the End Customer, does config, etc. based on task state.
+        print("[SYSTEM] Continuing with the provisioning/config chain for the existing customer.")
+        result = _do_provision_chain(
+            page, so_id, matched_id,
+            existing=True, verify_only=False,
+            sor=sor_data, pre_done=pre_done,
+            force_config=bool(plan.get("force_config")),
+            tasks=snap.get("tasks"),
+            vac_seats=_vac_seats_from_snapshot(snap),
+        )
+        _print_system_write_summary(result, plan)
+        return
+
+    # Genuinely new (no End Customer, no dedup match) -> create from the snapshot, then chain.
     print("\n--- Create Customer (fill only, from snapshot) ---")
     cust_id = _do_create_customer(page, so_id, data={
         "customer_name": sor_data.get("location_name", ""),
@@ -868,22 +940,44 @@ def _do_system(page, so_id, assembly_week=None, dedup_test=True):
         sor=sor_data,
         pre_done=pre_done,
         force_config=bool(plan.get("force_config")),
+        tasks=snap.get("tasks"),
+        vac_seats=_vac_seats_from_snapshot(snap),
     )
-    _print_system_write_summary(result)
+    _print_system_write_summary(result, plan)
     return
 
 
-def _print_system_write_summary(result):
-    """Print what this system command actually wrote, separate from snapshot state."""
+TASK_NAMES = {
+    1: "Hardware verified", 2: "End-customer info obtained",
+    3: "Connected with end-customer/dealer", 4: "Card approval received",
+    5: "Card proofs, PO sent", 6: "Sent SaaS contract",
+    7: "Sent Payment processing contract", 8: "End-customer and location added to Portal",
+    9: "VAC Config files attached to order", 10: "Created Admin Portal user and emailed Intro email",
+}
+
+
+def _print_system_write_summary(result, plan=None):
+    """Print EVERYTHING this system command actually wrote -- setup (tag/week/hardware) +
+    the provisioning chain + the final task checklist -- so the summary reflects the whole run,
+    not just the chain (Matt: it should say what it actually did, all of it)."""
     if not isinstance(result, dict):
         return
+    setup_actions = (plan or {}).get("setup_actions", []) if isinstance(plan, dict) else []
     actions = result.get("actions", [])
+    done = result.get("done", {}) or {}
+
     print("\n--- System Write Summary ---")
-    if actions:
-        for action in actions:
-            print(f"DID:  {action}")
-    else:
-        print("DID:  no write actions in the provisioning chain")
+    if not setup_actions and not actions:
+        print("DID:  no write actions this run")
+    for action in setup_actions:
+        print(f"DID:  {action}")
+    for action in actions:
+        print(f"DID:  {action}")
+
+    if done:
+        print("\n  Task checklist set this run:")
+        for n in sorted(done):
+            print(f"    Task {n:>2}: {done[n]:<10} {TASK_NAMES.get(n, '')}")
 
 
 def _can_run_chain_from_snapshot(plan):
@@ -909,6 +1003,7 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
     sor_data = snap.get("sor_data", {}) or {}
     tasks = snap.get("tasks", {}) or {}
     done = {}
+    setup_actions = []   # surfaced in the System Write Summary so it reports tag/week/hardware
     changed = False
 
     needs_tag = not (so_data.get("tag") or "").strip()
@@ -916,10 +1011,11 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
     task1_open = tasks.get(1, {}).get("status") != "Completed"
 
     if not (needs_tag or needs_week or task1_open):
+        plan["setup_actions"] = setup_actions
         return done
 
     print("\n" + "=" * 60)
-    print(f"  EXISTING-CUSTOMER SETUP -- SO-{so_id}")
+    print(f"  ORDER SETUP (tag / assembly week / hardware) -- SO-{so_id}")
     print("=" * 60)
     navigate_to_so(page, so_id)
 
@@ -968,6 +1064,7 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
         tag_value = build_tag(so_data.get("products", []), so_data.get("customer_name", ""))
         print(f"Tag: {tag_value}")
         action_set_tag(page, tag_value)
+        setup_actions.append(f"set tag: {tag_value}")
         changed = True
     else:
         print(f"\n--- Setup: Tag already set ({so_data.get('tag')}) -- skip ---")
@@ -978,6 +1075,7 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
             print(f">> PICKED: {chosen_label} ({chosen_week})")
             print(f"   Reason: {pick_reason}")
             action_set_assembly_week(page, chosen_week)
+            setup_actions.append(f"set assembly week: {chosen_label} ({chosen_week})")
             changed = True
         else:
             print(f">> COULD NOT AUTO-PICK ASSEMBLY WEEK: {pick_reason or 'no week returned'}")
@@ -993,6 +1091,7 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
         ) or []
         if added:
             changed = True
+            setup_actions.append("added hardware companion parts: " + ", ".join(str(a) for a in added))
         done[1] = "Completed"
     else:
         print("\n--- Setup: Hardware verified already Completed -- skip ---")
@@ -1009,9 +1108,11 @@ def _do_existing_customer_setup_from_snapshot(page, so_id, plan, assembly_week=N
         # The cust-id blocker was already cleared up front (before the fields were filled),
         # so don't re-clear at save time -- that could disturb the just-filled tag/week.
         save_so(page, accept_sor=False, clear_customer_location_blocker=False)
+        setup_actions.append("saved SO (tag / assembly week / hardware)")
     else:
         print("\n--- Setup: No SO field/part changes to save ---")
 
+    plan["setup_actions"] = setup_actions
     return done
 
 
@@ -1166,12 +1267,18 @@ def _do_config_files(page, so_id):
     paths = download_vac_configs(page, so_id, out_dir)
     if not paths:
         return False
-    upload_files_to_so(page, paths)
-    # The .cfg attachments don't persist or show in File Resources until the SO is saved.
-    # Save ONCE for all the files (not one save per file), THEN verify against what's
-    # actually on the SO (Matt: "need to save before you can verify those").
+    upload_files_to_so(page, paths)   # ADD the files (sets the input); does NOT submit
+    # Add, then Save -- that Save persists the .cfg files (Matt). The Save keeps us ON the SO,
+    # so verify right here -- NO navigation. The File Resources table repaints after the save, so
+    # poll a few times on the SAME page before deciding (Matt: it added the files but the checker
+    # read too early).
     save_so(page, accept_sor=False, clear_customer_location_blocker=False)
-    after = read_config_file_resources(page)
+    after = before
+    for _ in range(6):
+        after = read_config_file_resources(page)
+        if len(after) > len(before):
+            break
+        page.wait_for_timeout(1000)
     print(f"[CONFIG] File Resources after save: {len(after)} .cfg file(s)")
     verified = len(after) > len(before)
     if not verified:
@@ -1267,8 +1374,19 @@ def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_conf
     return done
 
 
+def _vac_seats_from_snapshot(snap):
+    """VAC seat count from the snapshot's product list -- lets the chain skip an SO re-read."""
+    try:
+        return sum(int(p.get("qty", 0) or 0)
+                   for p in (snap.get("so_data", {}) or {}).get("products", [])
+                   if (p.get("part_number", "") or "").upper().startswith("VAC"))
+    except Exception:
+        return 0
+
+
 def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
-                        ref_location_id="", sor=None, pre_done=None, force_config=False):
+                        ref_location_id="", sor=None, pre_done=None, force_config=False,
+                        tasks=None, vac_seats=None):
     """Guided no-ITF provisioning chain -- ONE flow, three flavors (reuses every step):
       NEW      : API user + Stripe-feature fill -> location(0100001) -> stripe -> SO link/config -> user/intro
       EXISTING : verify cust page (check only) -> location(next 01/02) -> stripe -> SO link/config -> [skip user/intro]
@@ -1295,33 +1413,41 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     # Task-driven: run ONLY the steps whose task is still To Do. Never re-run Completed
     # work, never blanket-reset the checklist. Task map: 7=payment/Stripe, 8=location,
     # 10=portal user+intro, 3/4/5=card.
-    navigate_to_so(page, so_id)
-    tasks = read_task_states(page)
+    # When the snapshot threaded tasks + seats + SOR (system run), DON'T navigate back to the SO
+    # after Create Customer -- go straight to the customer page. Standalone callers (no snapshot)
+    # read tasks/seats/notes off the SO here.
+    from core.moops import read_products as _read_products, read_internal_notes as _read_notes
+    if tasks is None:
+        navigate_to_so(page, so_id)
+        tasks = read_task_states(page)
+        try:
+            vac_seats = sum(int(p.get("qty", 0) or 0) for p in _read_products(page)
+                            if (p.get("part_number", "") or "").upper().startswith("VAC"))
+        except Exception:
+            vac_seats = 0
+        _notes = _read_notes(page)
+        _merged_sor = dict(sor) if sor else {}
+        for _k in ("contact_name", "contact_email", "contact_phone",
+                   "location_name", "location_address"):
+            _merged_sor[_k] = (_notes.get(_k) or _merged_sor.get(_k) or "")
+        sor = _merged_sor
+    else:
+        # Snapshot-threaded: tasks + seats + SOR already in hand -- no SO navigation needed.
+        if vac_seats is None:
+            vac_seats = 0
+        sor = dict(sor) if sor else {}
     todo = {n for n, t in tasks.items() if t.get("status") == "To Do"}
     print(f"  Tasks To Do: {sorted(todo) or 'none'} -- running only those.")
-
-    # ONE-PASS read while we're already on the SO: VAC seat count + internal notes.
-    # Merge notes with the threaded SOR so Location and User steps NEVER navigate back.
-    from core.moops import read_products as _read_products, read_internal_notes as _read_notes
-    try:
-        vac_seats = sum(int(p.get("qty", 0) or 0) for p in _read_products(page)
-                        if (p.get("part_number", "") or "").upper().startswith("VAC"))
-    except Exception:
-        vac_seats = 0
-    _notes = _read_notes(page)
-    # Build merged SOR: notes first (written by first_touch), SOR fallback.
-    # This is the single authoritative contact+address dict for the entire chain.
-    _merged_sor = dict(sor) if sor else {}
-    for _k in ("contact_name", "contact_email", "contact_phone",
-               "location_name", "location_address"):
-        _merged_sor[_k] = (_notes.get(_k) or _merged_sor.get(_k) or "")
-    # Log what we resolved so Matt can verify without a second read.
-    _cn = _merged_sor.get("contact_name", "")
-    _ce = _merged_sor.get("contact_email", "")
-    _la = _merged_sor.get("location_address", "")
+    _cn = sor.get("contact_name", "")
+    _ce = sor.get("contact_email", "")
+    _la = sor.get("location_address", "")
     print(f"  [CHAIN] Contact: {_cn or '(blank)'} / {_ce or '(blank)'} | "
           f"Location addr: {(_la[:40] + '...') if len(_la) > 40 else _la or '(blank)'}")
-    sor = _merged_sor   # replace sor with the merged dict for all downstream steps
+
+    # Fortis/EBT customers process on Fortis, not Stripe -- used both to skip the Stripe
+    # reporting feature on the cust page (below) and to skip the Stripe merchant step later.
+    _pt0 = (sor.get("processor_type", "") or "").upper()
+    is_fortis = ("FORTIS" in _pt0) or ("EBT" in _pt0) or _pt0.strip() == "2"
 
     loc_id = ref_location_id   # for the End Customer link; set by the location step if it runs
     loc_key = ""
@@ -1348,8 +1474,8 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                 print("[CHAIN] Customer setup check found missing POS/Stripe feature flags.")
                 print("[CHAIN] Not changing existing customer settings in this run; use targeted apiuser if needed.")
         else:
-            print("\n--- API user (POS) + Stripe feature (Admin) ---")
-            provisioning.fill_api_user(page, cust_id)
+            print("\n--- API user (POS)" + ("" if is_fortis else " + Stripe feature") + " (Admin) ---")
+            provisioning.fill_api_user(page, cust_id, is_fortis=is_fortis)
             filled = True
         # The green LOGIN button is an <a target="_blank" href="/portal/<cust_id>"> -- clicking
         # it opens LaundroPortal in a NEW TAB that Playwright isn't driving, so we don't click
@@ -1416,8 +1542,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             # original computed id, which won't match the row that was saved (Matt's case).
             if loc_key:
                 try:
-                    saved = portal.read_portal_location(page, loc_key)
-                    actual_id = (saved.get("location_id") or "").strip()
+                    actual_id = portal.read_saved_location_id(page, loc_key)
                     if actual_id and actual_id != loc_id:
                         print(f"[CHAIN] Location ID changed at save: '{loc_id}' -> '{actual_id}' -- using yours.")
                         loc_id = actual_id
@@ -1507,7 +1632,8 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         if loc_id:
             set_so_end_customer(page, cust_id, location_id=loc_id, save=True)
             fc = read_so_end_customer(page)
-            write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id}")
+            if fc.get("id"):   # only claim the link if the re-read actually shows it
+                write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id}")
         else:
             print("[CHAIN] No location id available -- skipping SO link/config this run.")
             print("[CHAIN] Sign in to Admin Portal/LaundroPortal or paste the existing Location ID, "
@@ -1517,11 +1643,39 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         print("\n--- End Customer on SO ---")
         set_so_end_customer(page, cust_id, location_id=loc_id, save=True)
         fc = read_so_end_customer(page)  # re-read to confirm it took
-        write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id or '(blank)'}")
-    if verified_existing_location and fc.get("id") and loc_id:
+        if fc.get("id"):   # only claim the link if the re-read actually shows it
+            write_actions.append(f"linked SO End Customer {cust_id} / location {loc_id or '(blank)'}")
+
+    # If the End Customer didn't take, the cust id almost always isn't on the DEALER's record
+    # yet (a dealer can only order for end customers on their record). Add it on the dealer's
+    # customer page, you save, then refresh the SO and link it -- the config-task prerequisite.
+    # This is the choice that comes up on most first-time records (and when a customer that
+    # already exists is ordered under a different dealer).
+    if cust_id and loc_id and not fc.get("id") and not verify_only:
+        from core.moops import read_so_dealer_id, fill_dealer_end_customer_association
+        dealer_id = read_so_dealer_id(page)
+        if dealer_id:
+            print(f"\n--- End Customer not selectable -> add {cust_id} to dealer {dealer_id}'s record ---")
+            if fill_dealer_end_customer_association(page, dealer_id, cust_id):
+                # Association is added + saved inside the helper -- no pause. Refresh the SO
+                # and link the End Customer + location now.
+                navigate_to_so(page, so_id)
+                set_so_end_customer(page, cust_id, location_id=loc_id, save=True)
+                fc = read_so_end_customer(page)
+                if fc.get("id"):
+                    write_actions.append(
+                        f"associated {cust_id} to dealer {dealer_id}, linked End Customer + location {loc_id}")
+        else:
+            print("[CHAIN] Couldn't find the dealer's Customer link on the SO -- add the End "
+                  "Customer association on the dealer record manually, then re-run.")
+
+    # A confirmed End Customer link (cust id + location on the SO) PROVES the location exists in
+    # the Portal -> task 8 is done, even if the Location_Key wasn't captured during the add
+    # (Matt: location was done but task 8 came back off).
+    if fc.get("id") and loc_id:
         did_location = True
-        if 10 in todo:
-            pre_done[10] = "Completed"
+    if verified_existing_location and fc.get("id") and loc_id and 10 in todo:
+        pre_done[10] = "Completed"
 
     # VAC config files (task 9). REQUIRES End Customer + Location linked on the SO --
     # MOOPS uses them to populate CustomerKey and LocationID in the .cfg.
@@ -1533,15 +1687,10 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             did_config = bool(_do_config_files(page, so_id))
             if did_config:
                 write_actions.append("downloaded fresh VAC config files and uploaded them to File Resources")
-            if not did_config:
-                try:
-                    ans = input("[CHAIN] Config upload was not confirmed automatically. "
-                                "If you verified the config files are attached, type y to mark task 9 complete: ")
-                except (EOFError, KeyboardInterrupt):
-                    ans = ""
-                did_config = ans.strip().lower() in ("y", "yes")
-                if did_config:
-                    write_actions.append("operator confirmed VAC config files are attached")
+            else:
+                # No confirmation prompt -- _do_config_files already verifies by re-reading File
+                # Resources after the save. If it didn't land, leave task 9 To Do for a re-run.
+                print("[CHAIN] Config not confirmed in File Resources after save -- task 9 left To Do; re-run.")
         else:
             print("\n--- VAC config files (task 9): SKIPPED -- End Customer not set on SO. ---")
             print(f"[FLAG] Link End Customer {cust_id} / location {loc_id or '?'} on the SO first,")
@@ -1563,6 +1712,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         # (Matt: it wasn't finishing the checklist even though location/stripe/user/config ran).
         done = {}
         if did_stripe:     done[7] = "Completed"   # payment processing / Stripe
+        if is_fortis:      done[7] = "Completed"   # Fortis/EBT: payment handled in SF (Matt tracks + sends), not Stripe
         if did_location:   done[8] = "Completed"   # location added to Portal
         if did_config:     done[9] = "Completed"   # VAC config files uploaded
         if did_user_intro: done[10] = "Completed"  # portal user + intro email
@@ -1570,7 +1720,11 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             print(f"  Marking completed workflows: {sorted(done)}")
             set_task_checklist(page, done)
             write_actions.append(f"updated task checklist {sorted(done)}")
-        save_so(page, accept_sor=False)
+        # End Customer is already linked by now (cust + location), so the cust-id blocker
+        # doesn't apply -- do NOT run the loose clear here. It can grab the wrong field (the
+        # uninvoiced box) and error the save. Setup clears explicitly before fields; the clear
+        # is no longer run on any save except that one.
+        save_so(page, accept_sor=False, clear_customer_location_blocker=False)
         write_actions.append("saved SO after checklist update")
     else:
         # Existing/replacement reruns should touch only workflows completed by THIS pass,
@@ -1584,6 +1738,11 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             did_user_intro=did_user_intro,
         )
         done.update(pre_done)
+        if not verify_only:
+            done.setdefault(1, "Completed")   # hardware verified
+            done.setdefault(2, "Completed")   # end-customer info obtained
+        if is_fortis:
+            done[7] = "Completed"             # Fortis/EBT: payment handled in SF (Matt tracks + sends), not Stripe
         # Cards decision tree -> task states:
         #   no card        -> 3/4/5 N/A
         #   new design     -> 3 Completed (email), 4 To Do (approval), 5 To Do (PO after)
@@ -1594,7 +1753,9 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         if done:
             navigate_to_so(page, so_id)
             set_task_checklist(page, done)
-            save_so(page, accept_sor=False)
+            # End Customer already linked -- don't run the loose cust-id clear here; it can
+            # grab the wrong field (the uninvoiced box) and error the save. Nothing to clear.
+            save_so(page, accept_sor=False, clear_customer_location_blocker=False)
             write_actions.append(f"updated task checklist {sorted(done)} and saved SO")
         else:
             print("[CHAIN] No checklist changes from this pass -- no final SO save.")
@@ -1845,24 +2006,28 @@ def _console_exec(page, args):
 def _start_console(parser):
     """Persistent session: launch the browser once, run typed commands in a loop."""
     import traceback
-    print("\n2AUTO2MOOPS console -- the browser opens once and stays open across commands.\n")
-    print("MAIN RUNS  (full order processing)")
-    print("  system <id>           dedup -> tag -> schedule -> customer -> provision chain")
-    print("  parts  <id>           parts / readers order (EFS / VUnics / Slack)")
-    print("  cards  <id> [name]    cards-only order\n")
-    print("WORKFLOW STEPS  (run any single piece)")
-    print("  dedup \"<email|phone|name>\"      dedup-sor <id>         schedule <id>")
-    print("  createcust <id> [cust]          custid <so> [cust]     provision <so> <cust>")
-    print("  addloc <so> <cust>              adduser <so> <cust>    apiuser <cust>")
-    print("  stripe <cust> <key>             intro <cust>           itf <id>")
-    print("  tasks <id>                      snapshot <id>          final <id>")
-    print("  settasks <id>")
-    print("  card <so> <cust>  (card step only, safe on a system order)")
-    print("  r first|final <id>              m <id>  (card-modify)\n")
+    print("\n2AUTO2MOOPS console -- the browser opens once and stays open across commands.")
+    print("Every run is FILL-ONLY: it fills the forms and pauses; you review and Save.\n")
+    print("MAIN RUNS")
+    print("  system <id>   (s)    One idempotent run -- snapshot the SO + SOR, then do whatever is")
+    print("                       still To Do: resolve the customer (grab an existing match by")
+    print("                       dedup, or create a new one), tag + assembly week + hardware,")
+    print("                       Portal location, user, Stripe (skipped for Fortis), intro,")
+    print("                       cards, link End Customer (+ dealer association if needed),")
+    print("                       config files, task checklist.")
+    print("                       Route / Multi-Housing is auto-detected -> hardware + tag only.")
+    print("  parts  <id>   (p)    Parts / readers order (EFS / VUnics / Slack)")
+    print("  cards  <id> [name] (c)   Cards-only order\n")
+    print("WORKFLOW STEPS  (run a single piece)")
+    print("  dedup \"<email|phone|name>\"   dedup-sor <id>      schedule <id>       snapshot <id>")
+    print("  createcust <id> [cust]       custid <so> [cust]  provision <so> <cust>")
+    print("  addloc <so> <cust>           adduser <so> <cust> apiuser <cust>")
+    print("  stripe <cust> <key>          intro <cust>        card <so> <cust>  (card step only)")
+    print("  tasks <id>                   settasks <id>       itf <id>  (open IT/Jira form)\n")
     print("READ / INSPECT")
     print("  read <id>   plan <id>   intake   inspect <sor>   createcust <id> [cust] [--preview]")
     print("  inspect-form <url>   inspect-lp <cust> <url>   inspect-pp <key>   recopy\n")
-    print("  -v <run> for full step output                                   quit | exit")
+    print("  add -v to any run for full step-by-step output                  quit | exit")
     pw, context, page = launch_browser()
     sys.stdout = _QuietWriter(sys.stdout, logpath=RUN_LOG)  # summary console + full tee to run.log
     try:
