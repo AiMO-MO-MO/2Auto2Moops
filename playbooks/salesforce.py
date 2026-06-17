@@ -15,14 +15,22 @@ fills are STUBBED pending an `inspect-form` of each New form (Account / Location
 Opportunity) from inside the authenticated console -- never guess SF selectors.
 """
 
+import json
+import os
 import re
 import time
+import urllib.error
+import urllib.request
 
 from core.browser import navigate_to_so
 from core.moops import read_sor_data, read_internal_notes, read_so_end_customer, read_products
+from core.provisioning import _proper_case   # same name formatting used for the Cust ID
 
 SF_BASE = "https://trycentssf.lightning.force.com"
 SECONDARY_OWNER_ID = "005S6000003nvEjIAI"  # Mark -- Secondary_Owner__c on every opportunity (always)
+
+MOOPS_BASE = "https://moops.mitechisys.com"
+SAAS_WEBHOOK_ENV = "SLACK_SAAS_WEBHOOK_URL"  # incoming-webhook URL for #moops-matt-mark (env only, never committed)
 
 _DIRECTIONALS = {"n", "s", "e", "w", "north", "south", "east", "west",
                  "ne", "nw", "se", "sw"}
@@ -129,6 +137,76 @@ def build_it_email(loc_value: str, custom_location_id: str) -> str:
     return (f"May we please make the following a customer location with LW Loc ID: {loc_value}\n"
             f"{SF_BASE}/lightning/r/Custom_Location__c/{custom_location_id}/view\n"
             "May we also make the associated account a customer account")
+
+
+def _processor_label(sor: dict) -> str:
+    pt = (sor.get("processor_type", "") or "").upper()
+    if "FORTIS" in pt or "EBT" in pt or pt.strip() == "2":
+        return "Fortis (EBT)"
+    return "Stripe"
+
+
+def build_saas_message(so_id, cust_id, location_key, sor: dict) -> dict:
+    """Task 6 SaaS handoff -> Slack mrkdwn payload for #moops-matt-mark.
+
+    Posting this IS task 6 for our checklist. It does NOT create Salesforce records or send the
+    SaaS contract -- it tells Mark a new order is ready for the account / location / opportunity
+    work + intro email, and hands him the info he'd otherwise pull off the SOR. Reuses the SF
+    field helpers (to_e164, _parse_address) so the copy block matches docs/salesforce.md."""
+    sor = sor or {}
+    sid = str(so_id).lstrip("#")
+    so_link = f"{MOOPS_BASE}/order?order_id={sid}"
+    loc_name = _proper_case((sor.get("location_name", "") or "").split(" - ")[0].strip()) or "(location)"
+    dealer = sor.get("dealer", "") or "(dealer not read)"
+    addr = _parse_address(sor.get("location_address", ""))
+    phone = sor.get("contact_phone", "") or ""
+    e164 = to_e164(phone)
+    # Everything except the clickable SO link goes in the code block, one key:value per line
+    # (links don't render inside code blocks, so only the SO link sits up top).
+    block = "\n".join([
+        f"Cust ID:       {cust_id}",
+        f"Location_Key:  {location_key}",
+        f"Dealer:        {dealer}",
+        f"Processor:     {_processor_label(sor)}",
+        f"Location name: {loc_name}",
+        f"Street:        {addr.get('street', '')}",
+        f"City:          {addr.get('city', '')}",
+        f"State:         {addr.get('state', '')}",
+        f"ZIP:           {addr.get('zip', '')}",
+        f"Contact:       {_proper_case(sor.get('contact_name', '')) or '-'}",
+        f"Email:         {sor.get('contact_email', '') or '-'}",
+        f"Phone:         {phone or '-'}" + (f"  ({e164})" if e164 else ""),
+        f"SO number:     {sid}",
+        f"Reader kits:   {sor.get('total_kits', '') or '-'}",
+    ])
+    text = (
+        f"*{loc_name} - <{so_link}|SO-{sid}>*\n"
+        f"```{block}```\n"
+        "React when the account is built."
+    )
+    return {"text": text}
+
+
+def post_saas_handoff(so_id, cust_id, location_key, sor: dict):
+    """POST the task-6 handoff to #moops-matt-mark via a Slack incoming webhook.
+
+    URL from env SLACK_SAAS_WEBHOOK_URL (never committed -- post-only, single channel). Returns
+    (ok: bool, info: str). Missing env or a failed POST -> (False, reason) so the chain leaves
+    task 6 To Do instead of crashing. urllib only (no new dependency)."""
+    url = os.environ.get(SAAS_WEBHOOK_ENV, "").strip()
+    if not url:
+        return False, f"{SAAS_WEBHOOK_ENV} not set"
+    data = json.dumps(build_saas_message(so_id, cust_id, location_key, sor)).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            code = r.getcode()
+            body = r.read().decode("utf-8", "ignore").strip()
+    except Exception as e:
+        return False, f"post failed: {e}"
+    if code == 200:
+        return True, "posted"
+    return False, f"HTTP {code}: {body[:120]}"
 
 
 def run(page, so_id):

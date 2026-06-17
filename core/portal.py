@@ -81,9 +81,10 @@ def customer_location_summary(page, cust_id: str) -> str:
 def read_portal_location_index(page: Page, cust_id: str) -> list:
     """Read the LaundroPortal location index table for a customer.
 
-    Returns rows with location_id, address, and description/name. This is much
-    cheaper than opening every LocationPanel page and is enough for SO config
-    linking, which only needs the location id that matches the SOR address.
+    Returns rows with location_id, location_key (the LaundroPortal URL id), address, and
+    description/name. This is much cheaper than opening every LocationPanel page and is enough
+    for SO config linking and the SaaS handoff (which needs the Location_Key for an
+    already-created location).
     """
     rows = []
     if not login_to_portal(page, cust_id):
@@ -110,6 +111,9 @@ def read_portal_location_index(page: Page, cust_id: str) -> list:
                 const m = joined.match(/\b(\d{7})\b/);
                 if (!m) continue;
                 const locId = m[1];
+                const keyAnchor = tr.querySelector('a[href*="Location_Key="]');
+                const keyM = keyAnchor ? (keyAnchor.getAttribute('href') || '').match(/Location_Key=(\d+)/) : null;
+                const locationKey = keyM ? keyM[1] : '';
                 let address = '';
                 let description = '';
                 for (const c of cells) {
@@ -122,7 +126,7 @@ def read_portal_location_index(page: Page, cust_id: str) -> list:
                     const am = joined.match(/(\d+\s+[^|]+?,\s*[^|]+?,\s*[A-Z]{2,}(?:\b|$))/i);
                     if (am) address = am[1].trim();
                 }
-                if (locId && address) out.push({location_id: locId, address, description});
+                if (locId && address) out.push({location_id: locId, location_key: locationKey, address, description});
             }
             const seen = new Set();
             return out.filter(r => {

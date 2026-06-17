@@ -225,8 +225,24 @@ def fill_api_user(page, cust_id="", is_fortis=False):
     """
     if cust_id:
         url = f"{ADMIN_BASE}/customers/{cust_id}"
-        print(f"[NAV] Customer: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # The create-customer submit redirects the browser to THIS same /customers/<id> page. If
+        # our goto fires while that redirect is still in flight, Chromium raises "interrupted by
+        # another navigation". So: skip the goto if we're already on the page, otherwise retry
+        # through the race (the competing navigation is heading to the same URL anyway).
+        if (page.url or "").rstrip("/").endswith(f"/customers/{cust_id}"):
+            print(f"[NAV] Already on customer {cust_id} (create-customer redirect) -- skip goto")
+        else:
+            print(f"[NAV] Customer: {url}")
+            for attempt in range(3):
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    break
+                except Exception as e:
+                    if "interrupted by another navigation" in str(e) or "Timeout" in str(e):
+                        print(f"[NAV] customer-page nav race ({attempt + 1}/3) -- settling, retrying")
+                        page.wait_for_timeout(1500)
+                        continue
+                    raise
         try:
             page.wait_for_function(
                 "() => document.querySelector('[name=\"Root_Login\"]') !== null", timeout=15000)
@@ -833,8 +849,8 @@ def open_stripe(page, cust_id, location_key):
 def send_intro_email(page, cust_id):
     """Admin customer page final step: click the 'Send Intro Email' envelope for each
     Admin User (a span.cursor-pointer > i.fa-envelope in the #adminUsers table -- not a
-    button). Verifies the page is the right customer first; sending is a real outbound
-    email, so it's gated by an Enter confirm."""
+    button). Verifies the page is the right customer first; gated by an Enter confirm because
+    sending also resets the user's password and must not resend to someone who already got it."""
     url = f"{ADMIN_BASE}/customers/{cust_id}"
     print(f"[NAV] Customer: {url}")
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -861,14 +877,15 @@ def send_intro_email(page, cust_id):
         print(f"       (and appear in Admin Users) first. Save it, then run `intro {cust_id}`.")
         return
 
+    # Confirm before sending -- the intro also RESETS the user's password and shouldn't be resent
+    # to a user who already got it (Matt: SO-20070 resent an already-sent intro). Gate it.
     print(f"\n  [CONFIRM] Send the intro email to {n} admin user(s) for customer {cust_id}?")
-    print("            Press Enter to send, or Ctrl+C to skip.")
+    print("            Press Enter to send, or Ctrl+C to skip (e.g. already sent).")
     try:
         input()
-    except KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
         print("\n  [SKIP] No intro email sent.")
         return
-
     sent = 0
     for i in range(n):
         try:

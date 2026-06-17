@@ -247,7 +247,10 @@ class OrderPlanTests(unittest.TestCase):
         self.assertEqual(audit["missing_associations"], [])
         self.assertTrue(any("long cable review-only" in item for item in audit["skipped_associations"]))
 
-    def test_completed_system_has_no_automated_actions_when_only_salesforce_remains(self):
+    def test_task6_saas_handoff_is_actionable_when_only_task6_remains(self):
+        # Task 6 (SaaS) is now automated in the system run: the chain posts the order to the
+        # #moops-matt-mark Slack channel. A touched order with only task 6 left must be ACTIONABLE
+        # so the run proceeds to the chain and posts, instead of short-circuiting to "nothing to do".
         tasks = {
             1: {"status": "Completed"}, 2: {"status": "Completed"},
             3: {"status": "N/A"}, 4: {"status": "N/A"}, 5: {"status": "N/A"},
@@ -261,9 +264,9 @@ class OrderPlanTests(unittest.TestCase):
             tasks,
             {"id": "00121"},
         )
-        self.assertEqual(plan["actionable"], [])
-        self.assertIn("Task 6 To Do -> send account/SaaS in Salesforce (not automated in system run)",
-                      plan["blocked"])
+        self.assertIn("Task 6 To Do -> post SaaS handoff to #moops-matt-mark (Slack)",
+                      plan["actionable"])
+        self.assertFalse(any("Salesforce" in b for b in plan["blocked"]))
 
     def test_route_plan_skips_system_provisioning(self):
         tasks = {n: {"status": "To Do"} for n in range(1, 11)}

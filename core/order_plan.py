@@ -306,7 +306,11 @@ def build_system_rerun_plan(so_data: dict, sor_data: dict, tasks: dict,
             actionable.append(f"Card workflow may be needed from SOR card type: {card_type}")
 
         if task_status.get(6) == "To Do":
-            blocked.append("Task 6 To Do -> send account/SaaS in Salesforce (not automated in system run)")
+            # Task 6 is now automated in the system run: the chain posts the order to the
+            # #moops-matt-mark Slack channel (Mark then does the SF account/location/opportunity
+            # work + intro email). It's actionable work, not a Salesforce-only WAIT -- otherwise a
+            # touched order with only task 6 left short-circuits to "nothing to do" and never posts.
+            actionable.append("Task 6 To Do -> post SaaS handoff to #moops-matt-mark (Slack)")
 
     hard_blocked = []
     for blocker in blocked:

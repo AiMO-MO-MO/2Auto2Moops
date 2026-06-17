@@ -63,7 +63,7 @@ from core.moops import (
     set_so_end_customer,
 )
 from core.schedule import print_schedule
-from playbooks import first_touch, parts_order, cards_order, final_touch, intake, salesforce
+from playbooks import first_touch, parts_order, cards_order, final_touch, intake, salesforce, laundrylux
 from core import provisioning, portal, dedup
 from core.order_plan import build_system_rerun_plan, classify_card_type
 
@@ -174,6 +174,10 @@ class _QuietWriter:
             kept.append(line)
         if kept:
             self._real.write("".join(kept))
+            try:
+                self._real.flush()   # flush the CONSOLE too -- the log already flushes per write;
+            except Exception:        # without this the terminal block-buffers and the visible line
+                pass                 # lags the real position, making a slow read look "frozen".
 
     def flush(self):
         self._real.flush()
@@ -295,6 +299,11 @@ def _expand_verb(argv):
             print("[usage]  python run.py provision <so_id> <cust_id>")
             raise SystemExit(2)
         return [argv[0], "--so-id", rest[0], "--provision", rest[1]]
+    if verb in ("ll", "laundrylux"):  # Laundrylux stock VAC order: hardware + per-location configs
+        if not rest:
+            print("[usage]  python run.py ll <so_id>")
+            raise SystemExit(2)
+        return [argv[0], "--so-id", rest[0], "--laundrylux"]
     if verb == "custid":  # standalone Cust ID workflow (create customer + finalize), for testing
         if not rest:
             print("[usage]  python run.py custid <so_id> [cust_id]")
@@ -604,14 +613,16 @@ def _do_adduser(page, so_id, cust_id, sor=None):
                            {"contact_name": cn, "contact_email": ce, "contact_phone": cp})
 
 
-def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
+def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id=""):
     """Card workflow — single implementation used by system run AND cards-order playbook.
       new     -> clone + add + design email    -> returns "new"     (task 3 done)
       modify  -> version-bump clone + email    -> returns "new"     (task 3 done)
       reprint -> Create PO + PO email          -> returns "reprint" (task 5 done)
       none / generic / other -> nothing        -> returns "none"
     `sor` threaded from caller avoids re-fetching the SOR.
-    `shortname` overrides the auto-generated card shortname (cards-order CLI arg)."""
+    `shortname` overrides the auto-generated card shortname (cards-order CLI arg).
+    `location_id` sets the card's Card Ownership Location when known (system chain after the
+    location is created); blank in card-only/modify, so those clone End-Customer only."""
     import time as _t
     from core.moops import (read_customer_name, read_sor_data, generate_card_shortname,
                             clone_temp_card, action_add_card_to_so, save_so, open_card_design_email,
@@ -639,8 +650,16 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
                     print(f"\n[CARDS] {p['part_number']} already on the SO -- card was made on a prior "
                           "touch; not cloning a new one. (Card tasks left as previously set.)")
                     return "exists"
-        c_name = sor.get("contact_name", "")
-        c_email = sor.get("contact_email", "")
+        # Card-design correspondent: SOR "Who should we correspond with regarding the card design?"
+        # = "Me" -> the dealer rep who submitted the SOR; otherwise the store operator (New Contact).
+        correspondent = (sor.get("card_correspondent", "") or "").strip().lower()
+        if correspondent.startswith("me") and sor.get("submitted_by_email"):
+            c_name = sor.get("submitted_by_name", "") or sor.get("contact_name", "")
+            c_email = sor.get("submitted_by_email", "")
+            print(f"[CARDS] Correspondent = 'Me' -> card email to submitter {c_name} / {c_email}")
+        else:
+            c_name = sor.get("contact_name", "")
+            c_email = sor.get("contact_email", "")
         if cust_id and (not c_name or not c_email):
             try:
                 from core.portal import read_admin_contact
@@ -671,8 +690,10 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None):
                 shortname = generate_card_shortname(cust_name)
         else:
             shortname = generate_card_shortname(cust_name)
-        print(f"\n--- Cards ({ct}): CARD-MD-{shortname}, owner {cust_id} ---")
-        card_part = clone_temp_card(page, shortname, end_customer_id=cust_id)
+        print(f"\n--- Cards ({ct}): CARD-MD-{shortname}, owner {cust_id}"
+              + (f", location {location_id}" if location_id else "") + " ---")
+        card_part = clone_temp_card(page, shortname, end_customer_id=cust_id,
+                                    location_id=location_id)
         expected_part = f"CARD-MD-{shortname.upper()}"
         if ct == "modify" and card_part != expected_part:
             print(f"[CARDS] Expected {expected_part} after clone, got {card_part}.")
@@ -1355,6 +1376,37 @@ def _resolve_existing_location_id(page, cust_id, sor):
     return ""
 
 
+def _resolve_existing_location_key(page, cust_id, sor, loc_id=""):
+    """Find the LaundroPortal Location_Key (the URL id Mark needs) for an ALREADY-created
+    location. Used by the SaaS handoff on already-touched orders: the location was made on a
+    prior run so no Location_Key was captured this pass. Reuses the same LP index read as
+    _resolve_existing_location_id -- matches on the End-Customer location id first, then address.
+    Read-only. Returns '' if it can't resolve a single Location_Key."""
+    if not cust_id:
+        return ""
+    try:
+        from core import portal as _portal
+        rows = _portal.read_portal_location_index(page, cust_id)
+        if loc_id:
+            for row in rows:
+                if row.get("location_id", "") == loc_id and row.get("location_key"):
+                    return row["location_key"]
+        loc_addr = (sor or {}).get("location_address", "")
+        if loc_addr:
+            keys = []
+            for row in rows:
+                data = {"address": row.get("address", ""), "city": "", "state": "", "zip": ""}
+                if _location_match_score(loc_addr, data) >= 6 and row.get("location_key"):
+                    keys.append(row["location_key"])
+            if len(keys) == 1:
+                return keys[0]
+            if len(keys) > 1:
+                print("[CHAIN] Multiple Portal locations matched -- can't pick a Location_Key for the handoff.")
+    except Exception as e:
+        print(f"[CHAIN] Location_Key lookup failed ({e}).")
+    return ""
+
+
 def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_config=False,
                                   card_result="none", did_user_intro=False):
     """Checklist delta for existing/replacement chain runs."""
@@ -1370,7 +1422,9 @@ def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_conf
     if card_result == "new":
         done[3], done[4], done[5] = "Completed", "To Do", "To Do"
     elif card_result == "reprint":
-        done[3], done[4], done[5] = "N/A", "N/A", "Completed"
+        # Ordering the cards (the PO) IS task 4 -- the existing design is already approved and the
+        # PO/PDF goes to the manufacturer (Matt). So 4 + 5 both Completed; 3 N/A (no new contact).
+        done[3], done[4], done[5] = "N/A", "Completed", "Completed"
     return done
 
 
@@ -1458,6 +1512,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     did_stripe = False
     did_user_intro = False
     did_config = False
+    did_saas = False
     verified_existing_location = False
     pre_done = dict(pre_done or {})
     write_actions = []
@@ -1466,13 +1521,20 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     if not verify_only and ({7, 10} & todo):
         filled = False
         if existing:
-            # Existing customers are live accounts. Check only; do not change customer-level
-            # Admin settings from a system rerun just because task 7/10 is still open.
+            # Existing customers are live accounts -- check first, don't blindly reset settings.
             print("\n--- Customer page (check) ---")
             chk = provisioning.check_customer_setup(page, cust_id)
-            if chk is not None and (not chk.get("pos") or not chk.get("stripe")):
-                print("[CHAIN] Customer setup check found missing POS/Stripe feature flags.")
-                print("[CHAIN] Not changing existing customer settings in this run; use targeted apiuser if needed.")
+            # But an "existing" customer can be UNPROVISIONED (e.g. a record we just created and
+            # grabbed via dedup): if the POS API user is missing, that's a real gap to fill, not
+            # an existing-setting change. fill_api_user is fill-only (human reviews + saves) and
+            # only ticks the Stripe flag if it's off.
+            if chk is not None and not chk.get("pos"):
+                print("[CHAIN] No POS API user on this customer -- filling the gap (fill-only).")
+                provisioning.fill_api_user(page, cust_id, is_fortis=is_fortis)
+                filled = True
+            elif chk is not None and not chk.get("stripe"):
+                print("[CHAIN] Stripe reporting flag off -- leaving existing customer settings; "
+                      "use `apiuser` if it needs setting.")
         else:
             print("\n--- API user (POS)" + ("" if is_fortis else " + Stripe feature") + " (Admin) ---")
             provisioning.fill_api_user(page, cust_id, is_fortis=is_fortis)
@@ -1559,20 +1621,31 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     # be saved first. Skip for existing customers (they already have LP users; a never-
     # provisioned existing customer is handled with a manual `adduser`).
     user_created = False
-    if 10 in todo and not existing and not verify_only:
+    # A Portal user can only be created when the SOR actually carries a contact (name + email).
+    # Existing/reprint orders often have a BLANK SOR contact -> no user info -> no user to create
+    # (Matt: SO-20070 made a blank user). Gate on having that info; the location was done above.
+    sor_contact_name = ((sor or {}).get("contact_name", "") or "").strip()
+    sor_contact_email = ((sor or {}).get("contact_email", "") or "").strip()
+    have_user_info = bool(sor_contact_name and sor_contact_email)
+    if 10 in todo and not verify_only and have_user_info:
+        # Task 10 To Do + real contact info -> create the Portal user, then send the intro. Works
+        # for new customers AND existing-but-unprovisioned ones. (Gating on contact info, not the
+        # `existing` flag, avoids both the blank-user case and the old false task-10 completion.)
         print("\n--- Add User (LaundroPortal) ---")
         _do_adduser(page, so_id, cust_id, sor=sor)
         if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
-                      "then press Enter to continue (Stripe next)..."):
+                      "then press Enter to continue..."):
             return
-        user_created = True   # intro email is sent AFTER Stripe (user -> Stripe -> intro)
+        user_created = True
+        # Intro email right after the user is made (no Stripe gate). send_intro_email itself has a
+        # confirm stop so an already-sent intro isn't resent (Matt: keep that gate).
+        print("\n--- Intro email (Admin) ---")
+        provisioning.send_intro_email(page, cust_id)
+        did_user_intro = True
+    elif 10 in todo and not verify_only and not have_user_info:
+        print("\n--- Add User + Intro: skip (no contact name/email on the SOR -- nothing to create) ---")
     else:
-        print("\n--- Add User: skip (task 10 done / existing / replacement) ---")
-        # Existing (provisioned) customers already have a Portal user + intro email -- the
-        # chain doesn't re-create it, so count task 10 as done (Matt: it's already done).
-        # A rare existing-but-unprovisioned customer is handled with a manual `adduser`.
-        if existing and not verify_only and 10 in todo:
-            did_user_intro = True
+        print("\n--- Add User: skip (task 10 done / replacement) ---")
 
     # Stripe (task 7) -- ONLY for Stripe processors. Fortis/EBT orders (KIT-A35) run on
     # Fortis, not a Stripe merchant, so skip Stripe entirely for them. Needs a location key.
@@ -1593,12 +1666,8 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     else:
         print("\n--- Stripe: skip (task 7 done / replacement) ---")
 
-    # Intro email (task 10, part 2) -- sent AFTER Stripe so the customer's login AND payment
-    # processing are both ready when they receive it (user -> Stripe -> intro).
-    if user_created:
-        print("\n--- Intro email (Admin) ---")
-        provisioning.send_intro_email(page, cust_id)
-        did_user_intro = True
+    # (Intro email now goes out in the user step above, right after the user is made --
+    # no longer deferred behind Stripe.)
 
     # Cards (tasks 3/4/5). _do_cards runs the right card lane and reports which: "new"
     # (design email -> task 3), "reprint" (PO sent -> task 5), or "none".
@@ -1610,7 +1679,10 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     card_design_todo = (3 in todo) if card_kind in ("new", "modify") else (5 in todo)
     if card_kind != "none" and card_design_todo:
         print("\n--- Cards ---")
-        card_result = _do_cards(page, so_id, cust_id, sor=sor)
+        # Pass loc_id when we have it (set during the location step for fresh provisioning):
+        # the card's Card Ownership Location gets set alongside the End-Customer. Empty for
+        # not-yet-resolved cases (e.g. task 8 already done) -> clone sets End-Customer only.
+        card_result = _do_cards(page, so_id, cust_id, sor=sor, location_id=loc_id)
     elif ({3, 4, 5} & todo) and card_kind == "none":
         print("\n--- Cards: skip (SOR has no actionable card design type) ---")
         for n in (3, 4, 5):
@@ -1698,6 +1770,44 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     else:
         print("\n--- Config files: skip (task 9 done / N-A) ---")
 
+    # SaaS handoff (task 6): post the order info to the #moops-matt-mark Slack channel. Posting
+    # IS task 6 for our checklist -- it does NOT create SF records or send the SaaS contract
+    # (Mark does the account/location/opportunity work + intro email). Requires the End Customer
+    # linked AND the Location_Key captured (the URL location id Mark needs). urllib + env webhook;
+    # a missing env or failed post just leaves task 6 To Do (no crash, no double-ping on re-run).
+    if 6 in todo and fc.get("id") and not verify_only:
+        # Fresh orders capture loc_key when the location is saved this run. ALREADY-TOUCHED orders
+        # skipped the location step (task 8 done), so the Location_Key isn't in hand -- resolve it
+        # from the LaundroPortal location index (same read the End-Customer/config path uses),
+        # matching the End-Customer location id first, then the SOR address.
+        saas_loc_key = loc_key or _resolve_existing_location_key(
+            page, cust_id, sor, loc_id=loc_id or fc.get("location_id", ""))
+        if saas_loc_key:
+            # Existing orders leave the SOR contact blank (MOOPS fault) -- recover name/email/phone
+            # from the Admin customer record by cust id so the handoff carries the contact for Mark.
+            saas_sor = dict(sor or {})
+            if not (saas_sor.get("contact_name") or saas_sor.get("contact_email")):
+                from core.portal import lookup_customer_contact
+                c = lookup_customer_contact(page, cust_id)
+                if c:
+                    saas_sor["contact_name"] = saas_sor.get("contact_name") or c.get("contact_name", "")
+                    saas_sor["contact_email"] = saas_sor.get("contact_email") or c.get("contact_email", "")
+                    saas_sor["contact_phone"] = saas_sor.get("contact_phone") or c.get("contact_phone", "")
+            from playbooks.salesforce import post_saas_handoff
+            ok, info = post_saas_handoff(so_id, cust_id, saas_loc_key, saas_sor)
+            if ok:
+                did_saas = True
+                write_actions.append("posted SaaS handoff to #moops-matt-mark (task 6)")
+                print("[CHAIN] SaaS handoff posted to Slack -- marking task 6 Completed.")
+            else:
+                print(f"[CHAIN] SaaS handoff NOT posted ({info}) -- task 6 left To Do.")
+        else:
+            print("[CHAIN] SaaS handoff (task 6): couldn't determine the Location_Key from "
+                  "LaundroPortal -- task 6 left To Do. Verify the customer's location in LP, then re-run.")
+    elif 6 in todo and not verify_only:
+        print("[CHAIN] SaaS handoff (task 6): End Customer not linked on the SO yet -- task 6 "
+              "left To Do; link the End Customer, then re-run.")
+
     # Task checklist.
     # NEW customer (first pass) -> set the full baseline map (action_set_system_tasks).
     # EXISTING/replacement -> CHECK OFF each task whose workflow the chain actually completed
@@ -1716,6 +1826,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         if did_location:   done[8] = "Completed"   # location added to Portal
         if did_config:     done[9] = "Completed"   # VAC config files uploaded
         if did_user_intro: done[10] = "Completed"  # portal user + intro email
+        if did_saas:       done[6] = "Completed"   # SaaS handoff posted to Slack (Mark does SF)
         if done:
             print(f"  Marking completed workflows: {sorted(done)}")
             set_task_checklist(page, done)
@@ -1738,6 +1849,8 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             did_user_intro=did_user_intro,
         )
         done.update(pre_done)
+        if did_saas:
+            done[6] = "Completed"             # SaaS handoff posted to Slack (Mark does SF)
         if not verify_only:
             done.setdefault(1, "Completed")   # hardware verified
             done.setdefault(2, "Completed")   # end-customer info obtained
@@ -1746,9 +1859,13 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         # Cards decision tree -> task states:
         #   no card        -> 3/4/5 N/A
         #   new design     -> 3 Completed (email), 4 To Do (approval), 5 To Do (PO after)
-        #   reprint        -> 3 N/A, 4 N/A (existing design already approved), 5 Completed (PO sent)
+        #   reprint        -> 3 N/A, 4 Completed (design approved, PO/PDF to mfr), 5 Completed (PO sent)
         if card_result == "exists":
             pass  # card made on a prior touch -- leave 3/4/5 as they were set then
+        # Write ONLY tasks this run actually CHANGED -- never re-mark ones already at that status
+        # (Matt: a touched order should touch ONLY task 6, not re-complete 1/2/8 that were done).
+        done = {k: v for k, v in done.items()
+                if (tasks.get(k, {}) or {}).get("status") != v}
         print(f"\n--- Task checklist (checking off completed workflows: {sorted(done) or 'none'}) ---")
         if done:
             navigate_to_so(page, so_id)
@@ -1971,6 +2088,8 @@ def _console_exec(page, args):
         _do_custid(page, args.so_id, args.cust_id)
     elif args.provision is not None:
         _do_provision_chain(page, args.so_id, args.provision)
+    elif args.laundrylux:
+        laundrylux.run(page, args.so_id)
     elif args.salesforce:
         salesforce.run(page, args.so_id)
     elif args.snapshot:
@@ -1999,7 +2118,7 @@ def _console_exec(page, args):
     elif args.so_id is not None:
         read_so(page, args.so_id)
     else:
-        print("[console] try: system <id> | parts <id> | cards <id> [name] | dedup-sor <id> | "
+        print("[console] try: system <id> | parts <id> | cards <id> [name] | ll <id> | dedup-sor <id> | "
               "tasks <id> | schedule <id> | itf <id> | intake | inspect <sor> | read <id>")
 
 
@@ -2136,6 +2255,8 @@ def main():
                           help="Final touch playbook — pre-ship audit, complete all To Do tasks")
     playbook.add_argument("--card-modify", nargs="?", const="auto", default=None,
                           help="Modify existing card (clone+add+email). 'auto' or specify new name.")
+    playbook.add_argument("--laundrylux", action="store_true",
+                          help="Laundrylux stock VAC order: hardware + per-location configs (cust 01643)")
 
     # Individual actions (compose as needed)
     actions = parser.add_argument_group("individual actions")
@@ -2269,6 +2390,9 @@ def main():
 
         elif args.parts_order:
             parts_order.run(page, args.so_id)
+
+        elif args.laundrylux:
+            laundrylux.run(page, args.so_id)
 
         elif args.cards_order is not None:
             shortname = args.cards_order if args.cards_order != "auto" else None

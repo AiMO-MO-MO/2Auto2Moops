@@ -435,20 +435,28 @@ def read_so_end_customer(page: Page) -> dict:
     it references.
     """
     out = {"id": "", "name": "", "location_id": ""}
-    try:
-        v = (page.locator('#validity_customer-search').first.input_value() or "").strip()
-        m = re.match(r'(\d{3,6})\s*-\s*(.+)', v)
-        if m:
-            out["id"], out["name"] = m.group(1), m.group(2).strip()
-    except Exception:
-        pass
-    try:
-        lv = (page.locator('[id^="validity_$location_filter"]').first.input_value() or "").strip()
-        lm = re.match(r'(\d{5,9})\s*-', lv)
-        if lm:
-            out["location_id"] = lm.group(1)
-    except Exception:
-        pass
+    # Guard with count() FIRST (instant) before input_value(): when the End-Customer widget isn't
+    # on this SO page, a bare .first.input_value() waits the 30s default for an element that will
+    # never appear -- two of them = a 60s "freeze" on the snapshot. count()==0 -> skip immediately;
+    # if present, cap the read at 2s. (set_so_end_customer already guards this way.)
+    cust = page.locator('#validity_customer-search')
+    if cust.count():
+        try:
+            v = (cust.first.input_value(timeout=2000) or "").strip()
+            m = re.match(r'(\d{3,6})\s*-\s*(.+)', v)
+            if m:
+                out["id"], out["name"] = m.group(1), m.group(2).strip()
+        except Exception:
+            pass
+    loc = page.locator('[id^="validity_$location_filter"]')
+    if loc.count():
+        try:
+            lv = (loc.first.input_value(timeout=2000) or "").strip()
+            lm = re.match(r'(\d{5,9})\s*-', lv)
+            if lm:
+                out["location_id"] = lm.group(1)
+        except Exception:
+            pass
     if out["id"]:
         print(f"[READ] SO End Customer: '{out['name']}' ({out['id']})"
               + (f" location {out['location_id']}" if out["location_id"] else ""))
@@ -654,8 +662,13 @@ def read_sor_data(page: Page) -> dict:
         "existing_end_customer": "",  # "Swift Wash (01435)" -- authoritative existing link
         "existing_end_customer_id": "",
         "access_sharing": "",          # "Yes"/"No" -- drives 01 (grouped) vs 02 (new group) loc series
+        "card_correspondent": "",      # answer to "Who should we correspond with re: card design?"
+        "submitted_by_name": "",       # dealer rep who submitted -- card-email recipient when "Me"
+        "submitted_by_email": "",
         "shipping_method": "",
         "shipping_comments": "",
+        "dealer": "",          # General Info "Dealer" -> SF Distributor lookup / SaaS handoff
+        "total_kits": "",      # "Total # of kits needed" -> SF MOOPS Opp Number_of_Machines__c
         "sor_url": "",
     }
 
@@ -788,6 +801,7 @@ def read_sor_data(page: Page) -> dict:
             ("Location Address", "location_address"),
             ("Existing End Customer", "existing_end_customer"),
             ("Access Sharing", "access_sharing"),
+            ("Dealer", "dealer"),
         ]
         for field, key in field_map:
             lbl = page.locator('label, th, td').filter(has_text=field).first
@@ -803,6 +817,44 @@ def read_sor_data(page: Page) -> dict:
                     print(f"[READ] {field}: '{_one_line(val)}'")
     except Exception as e:
         print(f"[READ] Error reading contact/location info: {e}")
+
+    # --- Card correspondent: "Who should we correspond with regarding the card design?" ---
+    # "Me" => the dealer rep who SUBMITTED the SOR is the card-design contact (not the store
+    # operator/New Contact). Any other answer ("Location operator/store owner") keeps the operator.
+    try:
+        lbl = page.locator('label, th, td').filter(has_text="correspond with regarding").first
+        if lbl.count() > 0:
+            raw = lbl.locator('..').inner_text()
+            ans = re.sub(r'(?is).*card design\?\s*', '', raw).strip()  # drop the question, keep answer
+            result["card_correspondent"] = _one_line(ans)
+            print(f"[READ] Card correspondent: '{result['card_correspondent']}'")
+    except Exception as e:
+        print(f"[READ] Error reading card correspondent: {e}")
+
+    # --- Submitted By (dealer rep name + email) -- the recipient when correspondent == "Me" ---
+    try:
+        lbl = page.locator('label, th, td').filter(has_text="Submitted By").first
+        if lbl.count() > 0:
+            val = _one_line(lbl.locator('..').inner_text().replace("Submitted By", "")).strip()
+            em = re.search(r'[\w.+-]+@[\w.-]+\.\w+', val)
+            if em:
+                result["submitted_by_email"] = em.group(0)
+            result["submitted_by_name"] = re.sub(r'[\w.+-]+@[\w.-]+\.\w+', '', val).strip().strip(',').strip()
+            print(f"[READ] Submitted By: '{result['submitted_by_name']}' / '{result['submitted_by_email']}'")
+    except Exception as e:
+        print(f"[READ] Error reading Submitted By: {e}")
+
+    # --- Read Total # of kits needed (count only) -> SF MOOPS Opp Number_of_Machines__c ---
+    # The label and the count render in separate cells, so match against the whole SOR text
+    # rather than one element ([:\s]* spans the ':'/newline between the label and the number).
+    try:
+        body_txt = page.locator("body").inner_text(timeout=3000)
+        m = re.search(r"Total # of kits needed[:\s]*([0-9]+)", body_txt)
+        if m:
+            result["total_kits"] = m.group(1)
+            print(f"[READ] Total kits: {result['total_kits']}")
+    except Exception as e:
+        print(f"[READ] Error reading total kits: {e}")
 
     # --- Read Shipping Method + comments ---
     try:
@@ -1281,7 +1333,8 @@ def generate_card_shortname(customer_name: str) -> str:
 
 
 @timed
-def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "") -> str:
+def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "",
+                    location_id: str = "") -> str:
     """
     Clone A-TEMP-CARD-MD to create a new card part CARD-MD-{SHORTNAME}.
     Does NOT save -- human reviews first.
@@ -1290,6 +1343,9 @@ def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "") -> st
       shortname: Card shortname (e.g. "THELNDRY") — printed on back of card.
       end_customer_id: Optional customer ID (e.g. "01707") for existing customers.
           If provided, searches for that customer. If empty, defaults to Mitech.
+      location_id: Optional location ID (e.g. "0100001") to set in the card's Card
+          Ownership block, below End-Customer. Only passed when we already have it
+          (the system chain after the location is created); skipped when unknown.
 
     Steps:
       1. Navigate to A-TEMP-CARD-MD (part_id=3064)
@@ -1398,6 +1454,16 @@ def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "") -> st
         print(f"[ACTION] End-Customer set (searched: '{search_term}')")
     except Exception as e:
         print(f"[WARNING] Could not set End-Customer: {e}")
+
+    # Location (Card Ownership) on the card part -- only when handed a real customer id AND a
+    # location (the card-part location search is enabled once an End-Customer is chosen). Same
+    # pick -> Add Location -> verify path as the SO; the card-part field has its own selector.
+    if end_customer_id and location_id:
+        page.wait_for_timeout(500)
+        # Pick the location + click "Add Location" to attach it to the ownership table. That button
+        # is type=button (verified), so it adds the row WITHOUT saving the part -- the human's
+        # review-Save persists it, alongside the End-Customer id.
+        _commit_ownership_location(page, location_id, '#validity_portal_location_search')
 
     print(f"\n[ACTION] Card clone form filled: {new_part_number}")
     print("[PAUSE] Review and save the card. Press Enter when done.")
@@ -2000,6 +2066,26 @@ def action_add_required_parts(page: Page, processor_type: str = None,
                         missing.append({"source": cells[0], "part": cells[1], "desc": cells[2], "qty": cells[3]})
                 break
 
+    # Collapse duplicate missing-part rows by part number BEFORE processing. MOOPS lists the same
+    # companion once per source (e.g. wire splicer 03-01-43 from HV-SENSOR-01 qty 16 AND from
+    # 02-06-72 qty 160), but it's ONE product line on the order -- the totals add up (176). Without
+    # this, the 2nd entry tried to add 03-01-43 as a SECOND line; MOOPS keeps "Add To Order"
+    # disabled for a duplicate part, which hung the run (Matt: SO-20080). Summing -> add/stack once.
+    if missing:
+        agg = {}
+        for m in missing:
+            key = m["part"].strip().upper()
+            qn = m["qty"].strip()
+            qn = int(qn) if qn.isdigit() else 0
+            if key in agg:
+                prev = agg[key]["qty"].strip()
+                agg[key]["qty"] = str((int(prev) if prev.isdigit() else 0) + qn)
+                if m["source"].strip() not in agg[key]["source"]:
+                    agg[key]["source"] = f"{agg[key]['source']} + {m['source'].strip()}"
+            else:
+                agg[key] = dict(m)
+        missing = list(agg.values())
+
     # Track what we're already adding to avoid duplicates
     already_adding = {part.upper() for part, qty in to_add}
 
@@ -2079,6 +2165,13 @@ def action_add_required_parts(page: Page, processor_type: str = None,
             flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — VAC pedestal (customer-ordered only)")
             print(f"[SKIP] {mp} qty={mq} — VAC pedestal, only add if customer ordered")
             continue
+
+        # 5b. Drilling template (01-05-70) — reusable back-plate tooling. MOOPS reports one per
+        # reader, but a single template drills every stud hole, so only ONE is needed per order
+        # (Matt: "a drilling template is needed, but only 1, not as many as it says are missing").
+        if mp_upper == "01-05-70":
+            print(f"[ADD] {mp} qty=1 (drilling template — reusable; MOOPS asked for {mq})")
+            mq = 1
 
         # 6. Everything else — add it
         svc_idx = next((i for i, (p, q) in enumerate(to_add) if p.upper() == "SVC-LAUNDROMAT"), None)
@@ -2305,6 +2398,70 @@ def download_vac_configs(page: Page, so_id, out_dir) -> list:
 
 
 @timed
+def download_location_vac_configs(page: Page, so_id, out_dir, location_id, units) -> list:
+    """Laundrylux stock flow: download THIS location's VAC configs after its End Customer
+    location has been linked + saved on the SO (so MOOPS bakes the right location-specific
+    data into each .cfg). `units` is the list of (kiosk_n, part_number) pairs for this
+    location (1 or 2 of them) -- KioskName restarts at VAC01 per location. Each .cfg is the
+    matching VAC row's Get Config download (regenerated for the now-linked location), with only
+    KioskName patched to VAC{kiosk_n:02d}. Returns the saved .cfg paths.
+
+    Unlike download_vac_configs (one pass, sequential VAC01..VACn across the order), this is
+    called ONCE PER LOCATION so the location-specific fields differ per pair (Matt: you must
+    re-download on each location switch -- the file pulls location-specific info)."""
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    rows = page.locator('tr[id^="existing_part_order_"]')
+    # Map part_number -> row for quick lookup (first matching VAC row per part).
+    row_by_part = {}
+    for i in range(rows.count()):
+        try:
+            a = rows.nth(i).locator('th[scope="row"] a')
+            pn = (a.first.inner_text() or "").strip() if a.count() else ""
+        except Exception:
+            pn = ""
+        if pn and pn.upper().startswith("VAC") and pn not in row_by_part:
+            row_by_part[pn] = rows.nth(i)
+    for kiosk_n, part in units:
+        row = row_by_part.get(part)
+        if row is None:
+            print(f"[CONFIG] No VAC row for {part} at location {location_id} -- skipping that unit.")
+            continue
+        btn = row.locator('button:has-text("Get Config")')
+        if btn.count() == 0:
+            print(f"[CONFIG] No 'Get Config' button on {part} row -- skipping.")
+            continue
+        tmp = os.path.join(out_dir, "_tmp.cfg")
+        try:
+            with page.expect_download(timeout=20000) as dl_info:
+                btn.first.click()
+            dl_info.value.save_as(tmp)
+            with open(tmp, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except Exception as e:
+            print(f"[CONFIG] Get Config failed for {part} @ {location_id} ({e}) -- skipping.")
+            continue
+        patched, nsub = re.subn(
+            r'("SettingName"\s*:\s*"KioskName"\s*,\s*"SettingValue"\s*:\s*")[^"]*(")',
+            lambda m: f'{m.group(1)}VAC{kiosk_n:02d}{m.group(2)}', content, count=1)
+        if nsub == 0:
+            print(f"[CONFIG] [WARN] No KioskName line in {part}'s config -- wrote unchanged.")
+        dest = os.path.join(out_dir, f"SO{so_id}_LL_{location_id}_VAC{kiosk_n:02d}_{part}.cfg")
+        try:
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(patched)
+            saved.append(dest)
+            print(f"[CONFIG] {location_id} VAC{kiosk_n:02d} ({part}) -> {os.path.basename(dest)}")
+        except Exception as e:
+            print(f"[CONFIG] Couldn't write {os.path.basename(dest)} ({e}).")
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return saved
+
+
 def upload_files_to_so(page: Page, paths: list) -> bool:
     """ADD files to the SO's File Resources by driving the page's own 'Upload Files' button
     (#fileTrigger) through the file chooser -- the same action a human does. That fires MOOPS's
@@ -2342,29 +2499,25 @@ def upload_files_to_so(page: Page, paths: list) -> bool:
 
 
 def read_config_file_resources(page: Page) -> list:
-    """Return unique .cfg filenames currently in the SO File Resources area. Reads the actual
-    download links first (<a download="...cfg"> / <a href="/files/..">) -- authoritative and works
-    even when the filename has spaces -- then falls back to any .cfg token in the page text."""
+    """Return the unique .cfg files attached in the SO File Resources area. MOOPS renders each
+    attached file as TWO anchors that share one /files/<id> href (a "View" link + a filename
+    link), so we dedupe by that file id -- the true unique file. We do NOT scan the page's body
+    text for .cfg tokens: filenames contain spaces (e.g. 'SO..._Precision Laundry_...cfg'), so a
+    \\S+\\.cfg regex grabbed the post-space fragment as a PHANTOM name and over-counted 2 files
+    as 4 (Matt). Falls back to the lowercased name only when an anchor has no /files/<id> href."""
     try:
         names = page.evaluate(r"""() => {
-            const seen = new Set();
-            const out = [];
-            const add = (raw) => {
-                if (!raw) return;
-                const name = String(raw).trim().replace(/[),.;:]+$/, '');
-                if (!/\.cfg$/i.test(name)) return;
-                const key = name.toLowerCase();
-                if (!seen.has(key)) { seen.add(key); out.push(name); }
-            };
-            // Authoritative: File Resources download links.
-            for (const a of document.querySelectorAll('a[download], a[href*="/files/"]')) {
-                add(a.getAttribute('download') || '');
-                add((a.textContent || '').trim());
+            const byKey = new Map();
+            for (const a of document.querySelectorAll('a[href*="/files/"], a[download]')) {
+                const dl = (a.getAttribute('download') || '').trim();
+                const txt = (a.textContent || '').trim();
+                const name = /\.cfg$/i.test(dl) ? dl : (/\.cfg$/i.test(txt) ? txt : '');
+                if (!name) continue;
+                const m = (a.getAttribute('href') || '').match(/\/files\/(\d+)/);
+                const key = m ? ('file:' + m[1]) : ('name:' + name.toLowerCase());
+                if (!byKey.has(key)) byKey.set(key, name);
             }
-            // Fallback: any .cfg token in the page text (no-space filenames).
-            const text = document.body ? (document.body.innerText || '') : '';
-            for (const m of (text.match(/[^\s"'<>]+\.cfg\b/gi) || [])) add(m);
-            return out;
+            return [...byKey.values()];
         }""")
         print(f"[READ] Config files visible on SO: {len(names or [])}")
         return names or []
@@ -2862,6 +3015,80 @@ def _location_in_ownership_table(page: Page, location_id: str) -> bool:
     return False
 
 
+def _commit_ownership_location(page: Page, location_id: str, loc_search_selector: str) -> None:
+    """Add the Location to a Card Ownership block: fill the search-select, pick the dropdown row,
+    then click "Add Location" to commit the row to the ownership table. ONE shared path for both
+    blocks -- only the search field differs:
+      * SO page:        '[id^="validity_$location_filter"]'
+      * card-part page: '#validity_portal_location_search'
+    The End-Customer must already be set (the location field is enabled once a customer is chosen).
+
+    DOM facts (verified live on the card-part page): the button is
+    `<button type="button" class="btn btn-primary mr-sm-2"><span>Add Location</span>...`, DISABLED
+    until a row is picked. Because it's type="button" it does NOT submit/save the part -- it just
+    adds the row to the ownership table (Angular). Picking the row ALONE does not persist (that's
+    why a fill-only pick failed to attach); the Add Location click is required, and the human's own
+    Save persists the table. The End-Customer field has no such button (it binds a single value on
+    pick); the Location feeds a table, like "Add To Order" for products. Idempotent + never blocks."""
+    if not location_id:
+        return
+    try:
+        if _location_in_ownership_table(page, location_id):
+            print(f"[INFO] Location {location_id} already in Card Ownership -- skip.")
+            return
+        loc = page.locator(loc_search_selector)
+        if loc.count() == 0:
+            print("[INFO] Location search not present yet -- add the location manually.")
+            return
+        # Fill + pick the dropdown row. A just-created location is slow to come back on the
+        # card-part page, so retry the fill/pick a couple of times before giving up (1.2s once
+        # wasn't enough -- "No location row matched" on a fresh location).
+        picked = False
+        for _ in range(3):
+            loc.first.click()
+            loc.first.fill("")
+            loc.first.fill(location_id)
+            if _pick_validity_result(page, location_id):
+                picked = True
+                break
+            page.wait_for_timeout(900)
+        if not picked:
+            print(f"[INFO] No location row matched '{location_id}' after retries -- pick it + "
+                  "click Add Location manually.")
+            return
+        # Click "Add Location" (type=button -> adds the picked row to the ownership table; does NOT
+        # save the part). It's disabled until the pick registers, so poll for the ENABLED button in
+        # the location field's own form-group row -- matched by its "Add Location" text, not just
+        # btn-primary (the row also holds a dropdown-toggle button). Click via JS; skip gracefully
+        # if it never enables (the SO page has no such button and its own Save captures the pick).
+        clicked = "no-button"
+        for _ in range(8):
+            clicked = page.evaluate(
+                """(sel) => {
+                    const inp = document.querySelector(sel);
+                    if (!inp) return 'no-input';
+                    const row = inp.closest('.form-group') || inp.closest('.row') || document;
+                    const btn = [...row.querySelectorAll('button.btn-primary')]
+                        .find(b => /add location/i.test(b.textContent || ''));
+                    if (!btn) return 'no-button';
+                    if (btn.disabled) return 'disabled';
+                    btn.click();
+                    return 'clicked';
+                }""", loc_search_selector)
+            if clicked in ('clicked', 'no-button', 'no-input'):
+                break
+            page.wait_for_timeout(400)   # 'disabled' -> wait for the pick to enable it, retry
+        page.wait_for_timeout(800)
+        if _location_in_ownership_table(page, location_id):
+            print(f"[ACTION] Added location {location_id} to Card Ownership.")
+        else:
+            print(f"[INFO] Add Location ({clicked}) -- {location_id} not in the table yet; "
+                  "verify in Card Ownership.")
+    except Exception as e:
+        print(f"[INFO] Couldn't auto-add location ({e}) -- select {location_id} + click "
+              "Add Location manually.")
+
+
 def read_so_dealer_id(page: Page) -> str:
     """The dealer's MOOPS customer_id from the SO's Customer field link (top of the SO). The
     dealer is the account the SO was placed under, and its customer record holds the End
@@ -3012,45 +3239,9 @@ def set_so_end_customer(page: Page, cust_id: str, location_id: str = "", save: b
               "Location on the SO and save. Skipping the auto-save (won't clear the cust id).")
         return False
 
-    # Location (Card Ownership) -- pick the row, THEN click "Add Location" to commit it
-    # to the ownership table. Idempotent: skip if it's already listed.
-    if location_id:
-        try:
-            if _location_in_ownership_table(page, location_id):
-                print(f"[INFO] Location {location_id} already in Card Ownership -- skip.")
-            else:
-                loc = page.locator('[id^="validity_$location_filter"]')
-                if loc.count() == 0:
-                    print("[INFO] Location search not present yet -- add the location manually.")
-                else:
-                    loc.first.click()
-                    loc.first.fill(location_id)
-                    if not _pick_validity_result(page, location_id):
-                        print(f"[INFO] No location row matched '{location_id}' -- pick it + click "
-                              "Add Location manually.")
-                    else:
-                        # Click "Add Location" to commit the picked row -- but NEVER block the
-                        # run: this button isn't always present, so cap the wait at a few
-                        # seconds and skip gracefully if it's not there (the picked row may
-                        # already be set). Default click timeout is 30s -- that hung a run.
-                        add_btn = page.locator(
-                            'button:has-text("Add Location"), a:has-text("Add Location")').first
-                        try:
-                            add_btn.wait_for(state="visible", timeout=3000)
-                            add_btn.click(timeout=3000)
-                            page.wait_for_timeout(800)
-                            if _location_in_ownership_table(page, location_id):
-                                print(f"[ACTION] Added location {location_id} to Card Ownership.")
-                            else:
-                                print(f"[INFO] Clicked Add Location but {location_id} isn't in the "
-                                      "table yet -- verify manually.")
-                        except Exception:
-                            print(f"[INFO] No 'Add Location' button (or it didn't commit) for "
-                                  f"{location_id} -- the picked row may already be set; verify in "
-                                  "Card Ownership.")
-        except Exception as e:
-            print(f"[INFO] Couldn't auto-add location ({e}) -- select {location_id} + click "
-                  "Add Location manually.")
+    # Location (Card Ownership) -- pick the row, click "Add Location" to commit it, verify.
+    # Shared with the card-part page; the SO page's location search differs by selector.
+    _commit_ownership_location(page, location_id, '[id^="validity_$location_filter"]')
 
     if save:
         print(f"[ACTION] End Customer = {cust_id}"

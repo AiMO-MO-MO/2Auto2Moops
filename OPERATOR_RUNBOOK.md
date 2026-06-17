@@ -41,6 +41,7 @@ Matt `--so-id`/`--parts-order` style flags -- always the shorthand:
 | Parts/Readers | `python run.py p 19697` |
 | Cards order | `python run.py c 19697`  (or `c 19697 SHORTNAME`) |
 | Card modify | `python run.py m 19697` |
+| Laundrylux stock | `python run.py ll 19697`  (VAC-only: hardware + per-location configs, cust 01643) |
 | Read only | `python run.py read 19697` |
 | Intake board | `python run.py intake` |
 | Inspect one SOR | `python run.py inspect 27678` |
