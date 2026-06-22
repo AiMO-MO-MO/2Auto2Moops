@@ -71,31 +71,37 @@ A run of N orders should be: one queue read + one read per SOR + ~4 SF calls + o
    `Custom_Location__c WHERE Account__c IN (<matched account ids>)` covers them all.
 6. **Render once** at the end.
 
-## Step 1 — Read the live MOOPS queue (Chrome connector)
+## Step 1 — Read the live MOOPS queue (Chrome connector, JS extraction)
+
+**NEVER `get_page_text` the queue or the SOR pages** — they dump hundreds of rows/lines into context
+and are the single biggest reason a run burns usage. Use the `javascript_tool` to extract ONLY the
+fields you need and return compact JSON.
 
 1. `list_connected_browsers` → `select_browser` → `tabs_context_mcp(createIfEmpty: true)`.
-2. `navigate` to `https://moops.mitechisys.com/order-requests`, then `get_page_text`. The page is
-   Angular-rendered, so a plain web fetch returns `{{template}}` braces — you must use the Chrome
-   connector. Take only rows under **Submitted/In Review** whose Type is **Laundromat System**.
-3. For each in-scope row, `navigate` to `https://moops.mitechisys.com/order-requests/<id>` and
-   `get_page_text`.
+2. `navigate` to `https://moops.mitechisys.com/order-requests`, then run `references/queue_extract.js`
+   via `javascript_tool` (`action: javascript_exec`). It waits for the Angular render, walks the
+   table tracking the section heading, and returns ONLY the in-scope rows
+   (`section == 'Submitted/In Review'` AND `type` contains `Laundromat System`) as compact
+   `[{sor, type, linkedSO, desc}]` — typically a handful of rows, not the ~400-line page.
 
-If a read returns "Browser connection is unavailable", retry once — the bridge is occasionally flaky.
+If a call returns "Browser connection is unavailable", retry once — the bridge is occasionally flaky.
 
-## Step 2 — Extract the dedupe signals from each SOR
+## Step 2 — Extract the dedupe signals from each SOR (JS extraction, batched)
 
-The detail page is clearly labeled. Pull from the **End Customer/Operator Info** block (the actual
-customer), falling back to Shipping:
+For each in-scope SOR, `navigate` to `https://moops.mitechisys.com/order-requests/<id>` and run
+`references/sor_extract.js` via `javascript_tool`. It returns ONLY the dedupe fields as compact JSON
+(~7 fields), NOT the whole ~150-line page. **Batch all SORs in ONE `browser_batch`** (navigate +
+javascript_tool pairs) so it's a single round trip.
 
-- **Business name** ← `Description` and/or `Location Name`
-- **Contact name** ← `New Contact Name`
-- **Contact email** ← `New Contact Email`
-- **Contact phone** ← `New Contact Phone`
-- **Address / city / state** ← `Location Address`
-- If an **Existing End Customer** is named (a real cust id), that's the authoritative verdict — record
-  it and still confirm the match in both systems.
+`sor_extract.js` pulls from the **End Customer/Operator Info** block (falling back to Shipping):
+- **Business name** ← `Location Name` / `Description`
+- **Contact** ← `New Contact Name` / `New Contact Email` / `New Contact Phone`
+- **Address** ← `Location Address`
+- **Existing End Customer** — if a real cust id is named, that's the authoritative verdict; record it
+  and still confirm in both systems.
 
-Normalize: phone → last 10 digits; email → lowercased first token.
+Normalize: phone → last 10 digits; email → lowercased first token. ONLY if a field comes back empty
+for a given SOR, fall back to `get_page_text` for that one SOR.
 
 ## Step 3 — Salesforce dedupe (SF connector, read-only SOQL/SOSL)
 
@@ -218,6 +224,12 @@ dedupe_board.html` (bundled in this folder). Present the HTML file.
 
 ## Reference
 
+- `references/queue_extract.js` — Step 1: extracts ONLY in-scope SORs from the queue (compact JSON).
+- `references/sor_extract.js` — Step 2: extracts ONLY the dedupe signals from one SOR (compact JSON).
 - `references/sf_queries.md` — validated SOQL/SOSL patterns with real sample output.
 - `references/admin_dedupe.js` — the live Admin extraction + match script for the JavaScript tool.
 - `render_board.py` — builds `dedupe_board.html` from a `dedupe_results.json`.
+
+> **Efficiency contract:** Steps 1, 2, and 4 all return compact JSON via `javascript_tool`. Do NOT
+> `get_page_text` the queue, the SOR pages, or `/customers` — those full-page dumps are what made the
+> old version burn usage. Fall back to `get_page_text` only for a single field that came back empty.
