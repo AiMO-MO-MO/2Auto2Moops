@@ -12,6 +12,19 @@ from playwright.sync_api import sync_playwright, Page
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chrome_profile")
 MOOPS_BASE = "https://moops.mitechisys.com"
 
+# Lightweight run instrumentation -- count SO navigations so the optimization pass can compare
+# round-trips before/after a change. Reset at the start of a run, read in the end-of-run summary.
+_NAV_COUNT = 0
+
+
+def reset_nav_count() -> None:
+    global _NAV_COUNT
+    _NAV_COUNT = 0
+
+
+def get_nav_count() -> int:
+    return _NAV_COUNT
+
 
 def launch_browser() -> tuple:
     """
@@ -43,6 +56,7 @@ def navigate_to_so(page: Page, so_id: int) -> None:
     Retries on transient MOOPS hiccups (timeouts, ERR_HTTP_RESPONSE_CODE_FAILURE, etc.) --
     the server can be flaky and a single blip shouldn't kill a whole run mid-chain.
     """
+    global _NAV_COUNT
     url = f"{MOOPS_BASE}/order?order_id={so_id}"
     print(f"\nNavigating to SO-{so_id}...")
     last_err = None
@@ -50,6 +64,7 @@ def navigate_to_so(page: Page, so_id: int) -> None:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_selector('tr[id^="existing_part_order_"]', timeout=20000)
+            _NAV_COUNT += 1
             return
         except Exception as e:
             last_err = e
@@ -58,6 +73,25 @@ def navigate_to_so(page: Page, so_id: int) -> None:
             page.wait_for_timeout(3000)
     print(f"[ERROR] Couldn't load SO-{so_id} after 3 tries -- MOOPS may be down. Re-run when it's back.")
     raise last_err
+
+
+def ensure_on_so(page: Page, so_id: int) -> None:
+    """Navigate to the SO ONLY if we're not already on it with its content loaded.
+
+    Use in place of navigate_to_so where the previous step already left us on a FRESH SO page
+    (e.g. right after a save reloads it, with nothing navigating away in between) -- this skips a
+    redundant ~3-9s reload. If the URL doesn't match or the part rows aren't present, it falls back
+    to a full navigate_to_so (which does the retry + nav-count increment). A skip does NOT bump the
+    nav counter, so the end-of-run summary reflects the reduction."""
+    try:
+        on_so = (f"order_id={so_id}" in (page.url or "")
+                 and page.locator('tr[id^="existing_part_order_"]').count() > 0)
+    except Exception:
+        on_so = False
+    if on_so:
+        print(f"[NAV] Already on SO-{so_id} (loaded) -- skip reload.")
+        return
+    navigate_to_so(page, so_id)
 
 
 def navigate_to_cards(page: Page) -> None:

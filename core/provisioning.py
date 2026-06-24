@@ -128,20 +128,37 @@ def _proper_case(s):
 def next_customer_id(page):
     """Suggest the next Customer ID: max of the normal '0xxxx' series + 1, zero-padded
     to 5. The misnumbered rows (10347+, 80211) do NOT start with 0, so they're excluded.
+
+    Reuses the cached /customers scrape -- the system run's dedup pass already read the whole
+    list THIS run (and resets the cache per run), so we skip a second ~2000-row nav+scrape.
+    Falls back to a direct read when the cache is empty (standalone/legacy paths).
     Best-effort -- returns '' if the list can't be read. Always VERIFY before submit."""
-    print(f"[NAV] Reading customer IDs: {CUSTOMERS_URL}")
-    page.goto(CUSTOMERS_URL, wait_until="domcontentloaded", timeout=30000)
+    from core import portal
+    nums = set()
     try:
-        page.wait_for_function("() => !document.body.textContent.includes('{{')", timeout=15000)
-    except Exception:
-        page.wait_for_timeout(2000)
-    ids = page.evaluate("() => (document.body.innerText.match(/\\b0\\d{4}\\b/g) || [])")
-    nums = sorted({int(x) for x in ids})
+        # use_cache=True: returns the cached list with no nav if it's populated; otherwise it
+        # does ONE scrape (and caches it). Either way, no duplicate fetch.
+        for c in (portal.scrape_admin_customers(page, use_cache=True) or []):
+            cid = (c.get("cust_id") or "").strip()
+            if re.fullmatch(r"0\d{4}", cid):
+                nums.add(int(cid))
+    except Exception as e:
+        print(f"[INFO] Cached customer list unavailable ({e}) -- reading IDs directly.")
+        nums = set()
+    if not nums:
+        print(f"[NAV] Reading customer IDs: {CUSTOMERS_URL}")
+        page.goto(CUSTOMERS_URL, wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.wait_for_function("() => !document.body.textContent.includes('{{')", timeout=15000)
+        except Exception:
+            page.wait_for_timeout(2000)
+        ids = page.evaluate("() => (document.body.innerText.match(/\\b0\\d{4}\\b/g) || [])")
+        nums = {int(x) for x in ids}
     if not nums:
         print("[WARN] No 0xxxx customer IDs found -- enter Customer ID manually")
         return ""
     nxt = max(nums) + 1
-    print(f"[INFO] Highest 0xxxx ID = {max(nums):05d} -> suggest {nxt:05d}")
+    print(f"[INFO] Highest 0xxxx ID = {max(nums):05d} -> suggest {nxt:05d} (from /customers list)")
     return f"{nxt:05d}"
 
 
@@ -715,11 +732,16 @@ def open_stripe(page, cust_id, location_key):
         # click, lesson #1).
         print(f"\n  [CONFIRM] About to create a NEW Stripe merchant account for location "
               f"{location_key} (customer {cust_id}).")
+        # Typed skip ('s'), NOT Ctrl+C -- a SIGINT tears down the browser and the rest of the chain
+        # (cards / End Customer / config) then dies with "browser has been closed".
         try:
-            input("           Press Enter to create it (the script clicks 'Add New Merchant'), "
-                  "or Ctrl+C to skip...")
+            resp = input("           Press Enter to create it (script clicks 'Add New Merchant'), "
+                         "or type s + Enter to skip: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n  [SKIP] Stripe not set up.")
+            return False
+        if resp in ("s", "skip", "n", "no"):
+            print("\n  [SKIP] Stripe not set up (chose skip) -- continuing the run.")
             return False
         initiated = page.evaluate(
             """(addValue) => {
@@ -878,13 +900,18 @@ def send_intro_email(page, cust_id):
         return
 
     # Confirm before sending -- the intro also RESETS the user's password and shouldn't be resent
-    # to a user who already got it (Matt: SO-20070 resent an already-sent intro). Gate it.
+    # to a user who already got it (Matt: SO-20070 resent an already-sent intro). Skip via a TYPED
+    # 's' (NOT Ctrl+C): a SIGINT tears down the Playwright browser connection, so the next chain
+    # step (config nav) then dies with "browser has been closed" -- ending the run (Matt: SO-19738).
     print(f"\n  [CONFIRM] Send the intro email to {n} admin user(s) for customer {cust_id}?")
-    print("            Press Enter to send, or Ctrl+C to skip (e.g. already sent).")
+    print("            Press Enter to SEND, or type s + Enter to SKIP (e.g. user already got it).")
     try:
-        input()
+        resp = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
         print("\n  [SKIP] No intro email sent.")
+        return
+    if resp in ("s", "skip", "n", "no"):
+        print("  [SKIP] No intro email sent (chose skip) -- continuing the run.")
         return
     sent = 0
     for i in range(n):
@@ -915,7 +942,8 @@ def check_customer_setup(page, cust_id):
     """Existing-customer CHECK (read-only) of the Admin customer page: is there an API
     user with POS access, and is 'Payment Processing Reports Stripe' enabled?
 
-    Returns {"pos": bool, "stripe": bool} so the chain can decide whether to fill the gap,
+    Returns {"pos": bool, "stripe": bool, "contact_name/email/phone": str} so the chain can
+    decide whether to fill the gap AND thread the contact to the SaaS handoff (read-once),
     or None if the page couldn't be read (caller should not assume anything)."""
     url = f"{ADMIN_BASE}/customers/{cust_id}"
     print(f"[NAV] Customer: {url}")
@@ -941,7 +969,22 @@ def check_customer_setup(page, cust_id):
             for (const l of document.querySelectorAll('label')) {
                 if (/payment processing reports stripe/i.test(l.innerText || '')) {
                     const cb = l.querySelector('input[type=checkbox]'); if (cb) stripe = cb.checked; } }
-            return {pos, stripe};
+            // Read-once: grab the primary contact while we're on this page so the SaaS handoff
+            // (task 6) never has to navigate back here. Same label logic as read_admin_contact.
+            const read = (labelText) => {
+                for (const l of document.querySelectorAll('label')) {
+                    if ((l.textContent || '').trim() === labelText) {
+                        const group = l.closest('.form-group, div') || l.parentElement;
+                        const inp = group && group.querySelector('input, textarea, select');
+                        return inp ? (inp.value || inp.textContent || '').trim() : '';
+                    }
+                }
+                return '';
+            };
+            return {pos, stripe,
+                contact_name: read('Primary Contact Name'),
+                contact_email: read('Primary Contact Email'),
+                contact_phone: read('Primary Contact Phone Number')};
         }"""
     )
     print(f"[CHECK] customer {cust_id}: API user POS = {'yes' if info.get('pos') else 'NO'}; "

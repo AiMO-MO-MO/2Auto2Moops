@@ -5,6 +5,19 @@
 
 ## Session pickup
 
+> **2026-06-24 — chain-optimization pass merged to main.** Verified live across SO-20190..20196
+> (system new+existing, parts, all three card flows). Shipped: read-once contact threading (the
+> SaaS handoff reads the contact during the start-of-chain customer check; no second Admin trip
+> after config) + light `read_admin_contact` fallback; `ensure_on_so` nav guard; parts-order now
+> calls the shared `action_add_required_parts` so the missing-parts logic (incl. drilling template
+> qty=1) matches the system run; cards modify mislabel fixed; new-customer dealer-record TODO only
+> prints when the End Customer didn't link; **append-only action log** (`action_log.jsonl` +
+> `history <id>`); startup menu reconciled (ll/sf/sf-search/cardmod/history). moops-dedupe skill
+> gained a **reader-kit step** (gated on a missing kit). PARKED: unified single-entry run; money/
+> duplication guard (proposed). The remaining per-order time is MOOPS latency + human review
+> pauses — diminishing returns on speed; next high-value work is reliability (validity-field helper)
+> not speed.
+
 > `system <id>` is the live idempotent run. **2026-06-09: the EXISTING-customer flow was proven
 > end-to-end on SO-19946** (Wash'n Up 00720, second location): gap-fill on the cust page (Stripe
 > feature), new LP location create (with operator rename picked up by re-run), Stripe merchant +

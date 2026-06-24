@@ -35,7 +35,7 @@ sys.dont_write_bytecode = True
 # Matt pasting big console dumps. Truncated at the start of each console command.
 RUN_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log")
 
-from core.browser import launch_browser, navigate_to_so
+from core.browser import launch_browser, navigate_to_so, ensure_on_so
 from core.moops import (
     decode_vac,
     determine_pinpad_kit,
@@ -340,6 +340,10 @@ def _expand_verb(argv):
             print("[usage]  python run.py read <id>")
             raise SystemExit(2)
         return [argv[0], "--so-id", rest[0]] + rest[1:]
+    if verb in ("history", "hist"):  # show the action-log records for an SO (read-only, no browser)
+        if not rest:
+            return _usage("history <so_id>")
+        return [argv[0], "--history", rest[0]]
     if verb in ("snapshot", "plan"):  # read-only workflow state + rerun plan
         if not rest:
             return _usage("snapshot <id>")
@@ -707,8 +711,11 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id=""):
             input("\n[CHAIN] Review and send the card design email, then press Enter.")
         except (EOFError, KeyboardInterrupt):
             pass
-        print(f"[CARDS] Done (new design) -- {card_part}")
-        return "new"
+        label = "modify" if ct == "modify" else "new design"
+        print(f"[CARDS] Done ({label}) -- {card_part}")
+        # Return the real type. Task mapping treats new+modify alike (proof emailed = task 3
+        # done, re-approval = task 4 To Do), but the label/summary must not call a modify "new".
+        return "modify" if ct == "modify" else "new"
 
     if reprint:
         # Existing card already on the SO -> create the PO + send the PO email (human-gated;
@@ -726,10 +733,16 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id=""):
         if not card_part:
             print("[CARDS] No CARD-MD-* on the order -- can't create a PO; handle manually.")
             return "none"
+        # Typed skip ('s'), NOT Ctrl+C -- a SIGINT tears down the Playwright browser so the rest of
+        # the chain (End Customer / config) then dies with "browser has been closed".
         try:
-            input(f"\n[CHAIN] Ready to Create PO for {card_part}. Press Enter to continue, or Ctrl+C to skip.")
+            resp = input(f"\n[CHAIN] Ready to Create PO for {card_part}. Press Enter to continue, "
+                         "or type s + Enter to skip: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n[CARDS] Stopped before PO creation.")
+            return "none"
+        if resp in ("s", "skip", "n", "no"):
+            print("[CARDS] Skipped PO creation (chose skip).")
             return "none"
         po_url = create_card_po(page, card_part)
         if not po_url:
@@ -818,6 +831,22 @@ def _print_dedup_summary(res):
 
 
 def _do_system(page, so_id, assembly_week=None, dedup_test=True):
+    """`system <id>` entry -- wraps the run with light instrumentation (total elapsed + SO
+    navigation count) so the optimization pass can compare round-trips before/after a change.
+    Behavior is unchanged; the summary prints on any exit path."""
+    import time as _t
+    from core.browser import reset_nav_count, get_nav_count
+    reset_nav_count()
+    portal.reset_customer_cache()   # fresh /customers scrape per run; next_customer_id reuses it
+    _start = _t.time()
+    try:
+        return _do_system_run(page, so_id, assembly_week=assembly_week, dedup_test=dedup_test)
+    finally:
+        print(f"\n[SUMMARY] system {so_id}: {_t.time() - _start:.0f}s total, "
+              f"{get_nav_count()} SO navigation(s)")
+
+
+def _do_system_run(page, so_id, assembly_week=None, dedup_test=True):
     """`system <id>` -- one idempotent, snapshot-driven system reconciler."""
     plan = _do_snapshot(page, so_id)
     if not plan.get("actionable"):
@@ -996,9 +1025,23 @@ def _print_system_write_summary(result, plan=None):
         print(f"DID:  {action}")
 
     if done:
-        print("\n  Task checklist set this run:")
+        print("\n  Final task checklist (read off the SO):")
         for n in sorted(done):
             print(f"    Task {n:>2}: {done[n]:<10} {TASK_NAMES.get(n, '')}")
+
+    # Append-only audit trail (never breaks the run -- guard arg-building too).
+    try:
+        from core.action_log import append_action_log
+        append_action_log(
+            result.get("so_id"),
+            "system",
+            (setup_actions or []) + (actions or []),
+            customer=result.get("cust_id"),
+            flavor=result.get("flavor"),
+            tasks={str(k): v for k, v in done.items()} if done else None,
+        )
+    except Exception as e:
+        print(f"[action-log] skipped ({e}) -- run unaffected.")
 
 
 def _can_run_chain_from_snapshot(plan):
@@ -1281,7 +1324,7 @@ def _do_config_files(page, so_id):
             old.unlink()
         except Exception as e:
             print(f"[CONFIG] Could not remove stale local config {old.name} ({e})")
-    navigate_to_so(page, so_id)
+    ensure_on_so(page, so_id)   # End-Customer save already left us on a fresh SO -- skip the reload
     before = read_config_file_resources(page)
     print(f"[CONFIG] File Resources before config run: {len(before)} .cfg file(s)")
     print("[CONFIG] Downloading fresh config files from the current SO VAC rows.")
@@ -1419,7 +1462,7 @@ def _existing_chain_done_statuses(did_stripe=False, did_location=False, did_conf
         done[9] = "Completed"
     if did_user_intro:
         done[10] = "Completed"
-    if card_result == "new":
+    if card_result in ("new", "modify"):
         done[3], done[4], done[5] = "Completed", "To Do", "To Do"
     elif card_result == "reprint":
         # Ordering the cards (the PO) IS task 4 -- the existing design is already approved and the
@@ -1511,6 +1554,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     did_location = False
     did_stripe = False
     did_user_intro = False
+    filled = False          # customer page filled a gap (new cust, or unprovisioned-existing API user)
     did_config = False
     did_saas = False
     verified_existing_location = False
@@ -1524,6 +1568,17 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
             # Existing customers are live accounts -- check first, don't blindly reset settings.
             print("\n--- Customer page (check) ---")
             chk = provisioning.check_customer_setup(page, cust_id)
+            # Read-once: the check already sat on the Admin cust page and read the primary
+            # contact. Thread it into the SOR snapshot (existing orders carry a blank SOR
+            # contact -- MOOPS fault) so the SaaS handoff's guard is satisfied and it never
+            # navigates back to Admin. Only fill blanks; never overwrite a real SOR contact.
+            if chk and sor is not None:
+                if not sor.get("contact_name"):
+                    sor["contact_name"] = chk.get("contact_name", "")
+                if not sor.get("contact_email"):
+                    sor["contact_email"] = chk.get("contact_email", "")
+                if not sor.get("contact_phone"):
+                    sor["contact_phone"] = chk.get("contact_phone", "")
             # But an "existing" customer can be UNPROVISIONED (e.g. a record we just created and
             # grabbed via dedup): if the POS API user is missing, that's a real gap to fill, not
             # an existing-setting change. fill_api_user is fill-only (human reviews + saves) and
@@ -1627,10 +1682,20 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     sor_contact_name = ((sor or {}).get("contact_name", "") or "").strip()
     sor_contact_email = ((sor or {}).get("contact_email", "") or "").strip()
     have_user_info = bool(sor_contact_name and sor_contact_email)
-    if 10 in todo and not verify_only and have_user_info:
-        # Task 10 To Do + real contact info -> create the Portal user, then send the intro. Works
-        # for new customers AND existing-but-unprovisioned ones. (Gating on contact info, not the
-        # `existing` flag, avoids both the blank-user case and the old false task-10 completion.)
+    if 10 in todo and not verify_only and existing and not filled:
+        # Skip-if-EXISTS: the dedup result IS the cue. We grabbed an existing cust id (a duplicate)
+        # whose customer page needed NOTHING filled (`not filled` -> already provisioned: POS API
+        # user present) and only needed a location added -> the LP user already exists, so a new
+        # location for an existing customer doesn't need a new user. Skip the User step + intro;
+        # mark task 10 Completed (Completed == N/A in this scenario -- no new status needed).
+        # NOTE: an UNPROVISIONED existing customer (filled==True, API-user gap just filled, e.g. a
+        # record created on a failed prior run) is NOT this case -- it falls through and creates the
+        # user (preserves the SO-20057 fix: don't skip -> Stripe would have no user to grant).
+        print("\n--- Add User: skip (existing/provisioned customer -- cust id grabbed, only the "
+              "location was added; LP user already exists) -- task 10 Completed ---")
+        pre_done[10] = "Completed"
+    elif 10 in todo and not verify_only and have_user_info:
+        # NEW customer + real contact info -> create the Portal user, then send the intro.
         print("\n--- Add User (LaundroPortal) ---")
         _do_adduser(page, so_id, cust_id, sor=sor)
         if not _pause("\n[CHAIN] >>> SAVE the user in LaundroPortal FIRST (it must appear in the list), "
@@ -1815,7 +1880,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
     # ones we finished and NEVER blanket-reset, so previously-Completed tasks aren't un-done.
     if not existing and not verify_only:
         print("\n--- Task checklist (baseline + completed workflows) ---")
-        navigate_to_so(page, so_id)
+        ensure_on_so(page, so_id)   # config save already left us on a fresh SO -- skip the reload
         action_set_system_tasks(page)
         # action_set_system_tasks writes the static first-run map (7/8/9/10 = To Do). Override
         # the ones the chain actually completed THIS run so the checklist reflects reality
@@ -1868,7 +1933,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                 if (tasks.get(k, {}) or {}).get("status") != v}
         print(f"\n--- Task checklist (checking off completed workflows: {sorted(done) or 'none'}) ---")
         if done:
-            navigate_to_so(page, so_id)
+            ensure_on_so(page, so_id)   # config save already left us on a fresh SO -- skip the reload
             set_task_checklist(page, done)
             # End Customer already linked -- don't run the loose cust-id clear here; it can
             # grab the wrong field (the uninvoiced box) and error the save. Nothing to clear.
@@ -1877,18 +1942,43 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         else:
             print("[CHAIN] No checklist changes from this pass -- no final SO save.")
 
+    # Read the TRUE final checklist off the SO for the summary (we're on it after the save -- no
+    # extra nav). The per-pass `done` deltas under-reported: the new-customer path sets 1-5 via
+    # action_set_system_tasks separately, so the summary only listed 6-10 (Matt). Fall back to the
+    # delta if the read comes back empty (page not on the SO).
+    from core.moops import read_task_states as _read_task_states
+    final_tasks = {}
+    try:
+        # The final save reloads the SO; wait for the task selects to repaint before reading,
+        # else read_task_states finds 0 selects and the summary falls back to the partial delta
+        # (Matt: SO-20106 "Found 0 task selects" -> summary still showed only 6-10).
+        page.wait_for_selector('select[name="task_state"]', timeout=8000)
+        _ts = _read_task_states(page)
+        final_tasks = {n: (_ts.get(n, {}) or {}).get("status", "") for n in sorted(_ts)}
+    except Exception:
+        final_tasks = {}
+    if not final_tasks:
+        final_tasks = done if 'done' in locals() else {}
+
     print("\n" + "=" * 60)
     print(f"  CHAIN COMPLETE ({flavor}) for {cust_id} -- ran To Do tasks {sorted(todo) or 'none'}.")
-    if not existing and not verify_only:
-        print(f"  TODO (manual): add {cust_id} to the dealer record.")
-        print("  The SO End Customer search may not show this customer until that dealer link exists.")
+    if not existing and not verify_only and not fc.get("id"):
+        # Only when the End Customer still ISN'T linked. The chain auto-associates the new
+        # customer to the dealer record and links it when it can (fill_dealer_end_customer_
+        # association); this manual TODO is for the case that didn't complete -- not every
+        # new-customer run (which would tell you to redo work the chain just did).
+        print(f"  TODO (manual): add {cust_id} to the dealer record, then set the End Customer on the SO.")
+        print("  The SO End Customer search won't show this customer until that dealer link exists.")
     print("=" * 60)
     return {
         "actions": write_actions,
-        "done": done if 'done' in locals() else {},
+        "done": final_tasks,   # full final checklist read off the SO (all tasks), not just the delta
         "did_config": did_config,
         "did_location": did_location,
         "did_stripe": did_stripe,
+        "so_id": so_id,
+        "cust_id": cust_id,
+        "flavor": flavor,      # "NEW customer" | "EXISTING customer" | route variants
     }
 
 
@@ -2046,6 +2136,9 @@ def _console_exec(page, args):
     if args.recopy:
         from core import efs
         efs.recopy_last_snippet()
+    elif args.history is not None:
+        from core.action_log import print_history
+        print_history(args.history)
     elif args.inspect_form:
         provisioning.inspect_form(page, args.inspect_form)
     elif args.sf_search is not None:
@@ -2118,8 +2211,8 @@ def _console_exec(page, args):
     elif args.so_id is not None:
         read_so(page, args.so_id)
     else:
-        print("[console] try: system <id> | parts <id> | cards <id> [name] | ll <id> | dedup-sor <id> | "
-              "tasks <id> | schedule <id> | itf <id> | intake | inspect <sor> | read <id>")
+        print("[console] try: system <id> | parts <id> | cards <id> [name] | cardmod <id> | ll <id> | "
+              "sf <id> | dedup-sor <id> | tasks <id> | schedule <id> | intake | inspect <sor> | read <id>")
 
 
 def _start_console(parser):
@@ -2136,16 +2229,21 @@ def _start_console(parser):
     print("                       config files, task checklist.")
     print("                       Route / Multi-Housing is auto-detected -> hardware + tag only.")
     print("  parts  <id>   (p)    Parts / readers order (EFS / VUnics / Slack)")
-    print("  cards  <id> [name] (c)   Cards-only order\n")
+    print("  cards  <id> [name] (c)   Cards-only order")
+    print("  cardmod <id>  (m)    Card-modify -- address/design change on an existing card")
+    print("  ll <id>              Laundrylux stock VAC -- hardware + per-location configs\n")
     print("WORKFLOW STEPS  (run a single piece)")
     print("  dedup \"<email|phone|name>\"   dedup-sor <id>      schedule <id>       snapshot <id>")
     print("  createcust <id> [cust]       custid <so> [cust]  provision <so> <cust>")
     print("  addloc <so> <cust>           adduser <so> <cust> apiuser <cust>")
     print("  stripe <cust> <key>          intro <cust>        card <so> <cust>  (card step only)")
-    print("  tasks <id>                   settasks <id>       itf <id>  (open IT/Jira form)\n")
+    print("  tasks <id>                   settasks <id>       itf <id>  (open IT/Jira form)")
+    print("  sf <id>  (standalone Salesforce: account / location / opportunity)\n")
     print("READ / INSPECT")
-    print("  read <id>   plan <id>   intake   inspect <sor>   createcust <id> [cust] [--preview]")
-    print("  inspect-form <url>   inspect-lp <cust> <url>   inspect-pp <key>   recopy\n")
+    print("  read <id>   plan <id>   intake   inspect <sor>   history <id>  (what runs did to an SO)")
+    print("  createcust <id> [cust] [--preview]")
+    print("  inspect-form <url>   inspect-lp <cust> <url>   inspect-pp <key>   recopy")
+    print("  sf-search \"<query>\"  (SF typeahead dedupe discovery)\n")
     print("  add -v to any run for full step-by-step output                  quit | exit")
     pw, context, page = launch_browser()
     sys.stdout = _QuietWriter(sys.stdout, logpath=RUN_LOG)  # summary console + full tee to run.log
@@ -2216,6 +2314,8 @@ def main():
                        help="Admin: send the intro email for a customer's admin users (confirms first)")
     batch.add_argument("--recopy", action="store_true",
                        help="Re-copy the last EFS snippet (_efs_snippet.js) to the clipboard")
+    batch.add_argument("--history", type=str, default=None, metavar="SO_ID",
+                       help="Show the action-log history (every run the tool recorded) for an SO -- read-only")
     batch.add_argument("--inspect-lp", nargs=2, default=None, metavar=("CUST_ID", "URL"),
                        help="Log into LaundroPortal for CUST_ID (admin bridge), then dump URL's form controls")
     batch.add_argument("--inspect-pp", type=str, default=None, metavar="LOCATION_KEY",
@@ -2304,7 +2404,7 @@ def main():
             and args.sf_search is None
             and args.dedup_only is None and args.dedup_sor is None and args.api_user is None
             and args.inspect_lp is None and args.inspect_pp is None and args.stripe is None
-            and args.intro is None and not args.recopy and args.so_id is None):
+            and args.intro is None and not args.recopy and args.history is None and args.so_id is None):
         parser.error("provide an SO id (e.g. `system 19697`), or use `intake` / `inspect <sor>`")
 
     if not args.verbose:
@@ -2314,6 +2414,10 @@ def main():
     if args.recopy:  # no browser needed -- just re-copy the saved EFS snippet
         from core import efs
         efs.recopy_last_snippet()
+        return
+    if args.history is not None:  # no browser needed -- just read the local action log
+        from core.action_log import print_history
+        print_history(args.history)
         return
     if args.inspect_form is not None:
         print("Mode: form inspect")

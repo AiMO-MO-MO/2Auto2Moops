@@ -1583,31 +1583,45 @@ def open_card_design_email(page: Page, card_part_number: str,
     except Exception as e:
         print(f"[WARNING] Could not update message: {e}")
 
-    # Step 4: Select design files (skip PO files)
+    # Step 4: Select design files. Each attached file is a `div.file-item` (filename in
+    # `.file-info strong`, checkbox in `.file-actions input[name="file_resources"]`). MOOPS checks
+    # them ALL by default, but the card design email should carry ONLY design artwork -- so UNCHECK
+    # the PO and the .cfg config files (not design proofs). The old code scanned every div with a
+    # checkbox and matched the modal's own To:/CC:/Subject: chrome as "files" (Matt: SO-20106 logged
+    # 6 bogus skips); iterate the real .file-item rows instead.
     try:
-        # Find all file checkboxes in the modal
-        file_rows = modal.locator('tr, div').filter(has=page.locator('input[type="checkbox"]')).all()
-        selected = 0
-        skipped = 0
-        for file_row in file_rows:
+        items = modal.locator('div.file-item')
+        n = items.count()
+        selected = skipped = 0
+        for i in range(n):
+            item = items.nth(i)
             try:
-                text = file_row.inner_text().upper()
-                checkbox = file_row.locator('input[type="checkbox"]').first
-                if checkbox.count() == 0:
-                    continue
-                if "PO" in text or "PURCHASE" in text:
-                    # Uncheck if checked
-                    if checkbox.is_checked():
-                        checkbox.uncheck()
-                    skipped += 1
-                    print(f"[INFO] Skipped file (PO): {file_row.inner_text().strip()[:50]}")
-                else:
-                    if not checkbox.is_checked():
-                        checkbox.check()
-                    selected += 1
+                strong = item.locator('.file-info strong').first
+                name = (strong.inner_text() if strong.count() else item.inner_text() or "").strip()
             except Exception:
+                name = ""
+            up = name.upper()
+            is_design = not (re.search(r'\bPURCHASE\b', up) or re.search(r'\bPO\b', up)
+                             or up.endswith('.CFG'))
+            box = item.locator('input[name="file_resources"]').first
+            if box.count() == 0:
                 continue
-        print(f"[ACTION] Files: {selected} selected, {skipped} skipped (PO)")
+            try:
+                if is_design:
+                    if not box.is_checked():
+                        box.check()
+                    selected += 1
+                    print(f"[ACTION] Design file attached: {name[:60]}")
+                else:
+                    if box.is_checked():
+                        box.uncheck()
+                    skipped += 1
+                    print(f"[INFO] Unchecked (not design — PO/config): {name[:60]}")
+            except Exception as e:
+                print(f"[INFO] Could not toggle file '{name[:40]}' ({e})")
+        if n == 0:
+            print("[INFO] No attached files in the modal to choose from.")
+        print(f"[ACTION] Files: {selected} design selected, {skipped} unchecked (PO/config)")
     except Exception as e:
         print(f"[WARNING] Could not select files: {e}")
 
@@ -2963,10 +2977,12 @@ def open_po_email(page: Page) -> None:
         print(f"[WARNING] Could not clear CC: {e}")
 
     print("[ACTION] PO email ready — review and click Send")
-    print("[PAUSE] Press Enter after sending, or Ctrl+C to skip.")
+    # Plain Enter to continue (after you've sent or skipped it) -- do NOT instruct Ctrl+C: a SIGINT
+    # tears down the Playwright browser and the rest of the chain then dies "browser has been closed".
+    print("[PAUSE] Press Enter when done (sent or skipped).")
     try:
         input()
-    except KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
         print("\n[INFO] Continuing without confirming PO email send.")
 
 
