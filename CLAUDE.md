@@ -199,11 +199,17 @@ work itself. Do NOT run it — it opens the ITF Jira form and mis-marks card tas
 
 1. Wire splicers (03-01-43) → always ADD to existing qty (they stack)
 2. Already handled by rule-based logic → skip
-3. "OLD VERSION" in description → skip
+3. "OLD VERSION"/"OBSOLETE" in description → skip
 4. Blocker plates (01-05-56) from X-series/USX reader (`CR-*-126` family, e.g. CR-02-126, CR-10-126) → skip (built-in blockouts)
-4b. Long power cable (`02-06-78*`) → skip (almost never needed; add manually if required)
+4b. Reader companion cables (`02-06-*`) → skip (install-dependent BOM; the tech picks one; add manually if needed)
 5. VAC pedestal (01-03-03) → skip (only if customer ordered)
+5b. Drilling template (01-05-70) → ADD qty=1 (reusable tooling — one drills every hole; ignore MOOPS's per-reader count)
 6. Everything else → add
+
+This analyzer is `action_add_required_parts` (core/moops.py). The **parts-order playbook now calls the SAME
+function** — a parts order has no VACs, so its rule-based companions (CARD-03-01/paper/pinpad/SVC) are no-ops
+and only the missing-parts decisions run. One shared path so parts and system can't drift apart (was: parts
+only ran `action_add_splicers` and missed the drilling template).
 
 ## Code Structure
 
@@ -339,8 +345,16 @@ location/Stripe/user on already-provisioned existing customers; the SOR→SO cha
 None. Filters `available` to future-only before taking min.
 
 **Open / next:**
-- **Commit** the accumulated `optimize-system-rerun` working tree + drop the stale `stash@{0}`, then keep
-  these docs in sync with the code.
+- **Shipped this pass (chain-optimization → main, 2026-06-24):** read-once contact threading (SaaS handoff
+  reads the contact during the start-of-chain customer check and no longer re-navigates to Admin after
+  config); `read_admin_contact` (light) instead of `read_admin_portal` (heavy) on the fallback; parts-order
+  reuses the shared missing-parts analyzer (drilling template qty=1); cards modify mislabel fixed (returns
+  "modify"); new-customer dealer-record TODO only prints when the End Customer didn't link; append-only
+  **action log** `action_log.jsonl` + `history <id>` verb; startup menu reconciled (adds ll/sf/sf-search/
+  cardmod/history); moops-dedupe skill gained a **reader-kit step** (gated on a missing kit). Unified
+  single-entry run is **PARKED** by choice (memory `unified-run-parked`). The >5000 card-shipping line is
+  **system-order only** (memory `cards-shipping-line-system-only`).
+- Money/duplication guard (PO / Stripe merchant / intro email check-before-create) — proposed, not built.
 - **Missing-parts over-add on combo VACs** — a VAC with an integrated pinpad (e.g. VAC03 combo) shouldn't
   get a separate pinpad kit/attachment added; the missing-parts step is too eager. (Open.)
 - **LaundroPortal location-index phantom row** — `next_location_id` reads `0100001` for a zero-location
@@ -369,7 +383,8 @@ city/state, flags different-state). `dedup-sor <sor_id>` — read a raw SOR like
 `tasks <id>` (read checklist) / `settasks <id>` (set+save) / `schedule <id>` (capacity) /
 `final <id>` (legacy audit — retired, avoid).
 
-**Read / inspect:** `read <id>`, `intake`, `inspect <sor>`, `createcust <id> [cust] [--preview]`,
+**Read / inspect:** `read <id>`, `intake`, `inspect <sor>`, `history <id>` (audit log — every run the tool
+recorded against an SO, newest first; reads `action_log.jsonl`, no browser), `createcust <id> [cust] [--preview]`,
 `inspect-form <url>`, `inspect-lp <cust> <url>`, `inspect-pp <loc_key>`, `recopy`.
 Legacy: `s first <id>` still runs the old ITF first-touch; `r first|final <id>` (route), `m <id>` (cardmod).
 

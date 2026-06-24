@@ -194,3 +194,11 @@ def run(page, so_id, shortname=None):
     print("  Remaining:")
     print("    Work State -> Placed -> Accept SOR")
     print("=" * 60)
+
+    # Append-only audit trail (never breaks the run -- guard arg-building too).
+    try:
+        from core.action_log import append_action_log
+        append_action_log(so_id, "cards", [f"tag: {tag_value}", f"card workflow: {card_result}"],
+                          tag=tag_value, card_result=card_result, customer=cust_id)
+    except Exception as e:
+        print(f"[action-log] skipped ({e}) -- run unaffected.")

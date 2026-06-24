@@ -19,6 +19,11 @@ Order is created, by checking two systems live and bringing back every plausible
 signal it matched on. You never decide silently and you never write to either system. This is the
 gate, not the gatekeeper.
 
+The same SOR read also carries the **Card Reader Kits** table, so the run additionally reports
+**reader-kit assignment** for each order's machines (Step 2b) — deterministic, no extra SOR
+navigation and one shared index fetch. This is read-only too: surface the model → kit determination
+(and what's blocking an assignment); never edit the lookup tables.
+
 ## Prerequisites (the skill rides YOUR sessions — it carries no credentials)
 
 - **Salesforce connector** connected to the org (`trycentssf`), under a login with read access to
@@ -69,7 +74,10 @@ A run of N orders should be: one queue read + one read per SOR + ~4 SF calls + o
 4. **Admin = one JavaScript-tool call for ALL orders** (Step 4) — never per order.
 5. **Combinability query only for orders with an SF account match:** one
    `Custom_Location__c WHERE Account__c IN (<matched account ids>)` covers them all.
-6. **Render once** at the end.
+6. **Reader-kit = one index fetch, and ONLY if a kit is missing** (Step 2b): skip it entirely when
+   every machine already has a kit; otherwise `fetch('/reader_lookup/index')` once and match every
+   unassigned model locally — never the per-model search box.
+7. **Render once** at the end.
 
 ## Step 1 — Read the live MOOPS queue (Chrome connector, JS extraction)
 
@@ -102,6 +110,43 @@ javascript_tool pairs) so it's a single round trip.
 
 Normalize: phone → last 10 digits; email → lowercased first token. ONLY if a field comes back empty
 for a given SOR, fall back to `get_page_text` for that one SOR.
+
+**Same batch, second JS call per SOR:** run `references/sor_readers_extract.js` alongside
+`sor_extract.js` (same navigation) to capture the **Card Reader Kits** table + **Installation type**.
+It returns `{sor, installType, machines:[{model,desc,partReq,kit,secondary,assigned,qty,kitsNeeded}]}`.
+Carry it into Step 2b.
+
+## Step 2b — Reader-kit assignment (only when a kit is missing)
+
+**Gate — run this step ONLY if at least one machine came back `assigned === false`.** The cheap
+table read in Step 2 already tells you: if every machine on every in-scope SOR has a Reader Kit, there
+is nothing to resolve — **skip Step 2b entirely (no `/reader_lookup/index` fetch)** and just note
+"all reader kits assigned" for those orders. The index fetch + matching happens only for the orders
+that actually have an unassigned model.
+
+When the gate is open: collect the unassigned models (`assigned === false`, i.e. the Reader Kit cell
+reads "No reader kit assigned") across ALL orders that have them, then make **one** call: run
+`references/reader_match.js` (with `MODELS` filled in) on any MOOPS tab. It does `fetch('/reader_lookup/index')` once and tests every
+model against every `reg_ex` locally, returning the matched row(s) with the card kit (`card_part_id`/
+`card_kit`), the `hybrid_part_id`, and any `question_id`. **Never** drive the `/reader_lookup` search
+box one model at a time.
+
+Then classify each unassigned model (two-stage: regex picks the row, the order's **Installation
+type** picks the kit from that row's parts):
+
+- **No regex match** (`matched:false`) ⇒ genuinely not in the table → decode the model and propose a
+  new `READER_LOOKUP` regex + part mapping; escalate to **Oleg** (no UI — he edits Snowflake).
+- **Matched, but the order is `COIN+CARD (HYBRID)` and `hybrid_part_id` is null** ⇒ the row has no
+  hybrid kit. Check the SOR **Comments** for a per-machine card-only/hybrid split (orders mix). If the
+  machine is actually **card-only**, the answer is the row's `card_kit` (it shows unassigned only
+  because the order-level HYBRID flag forces the hybrid path). If it's **truly hybrid**, the hybrid
+  kit must be created/mapped → escalate to Oleg.
+- **Matched, card-only order, `card_part_id` present** ⇒ should have resolved; flag as an anomaly to
+  re-check (stale/overlapping row, or the model didn't match what MOOPS used).
+
+Output per the reader-kit contract — for each unassigned model: **decode** (one line), the **card-only
++ hybrid kit**, and a **ready-to-paste regex/part row** only when a new mapping is actually needed.
+Do not report "no kit assigned" as a finding — that's the input.
 
 ## Step 3 — Salesforce dedupe (SF connector, read-only SOQL/SOSL)
 
@@ -226,10 +271,18 @@ dedupe_board.html` (bundled in this folder). Present the HTML file.
 
 - `references/queue_extract.js` — Step 1: extracts ONLY in-scope SORs from the queue (compact JSON).
 - `references/sor_extract.js` — Step 2: extracts ONLY the dedupe signals from one SOR (compact JSON).
+- `references/sor_readers_extract.js` — Step 2: the Card Reader Kits table + Installation type from one SOR.
+- `references/reader_match.js` — Step 2b: one `/reader_lookup/index` fetch + local regex match for all models.
 - `references/sf_queries.md` — validated SOQL/SOSL patterns with real sample output.
 - `references/admin_dedupe.js` — the live Admin extraction + match script for the JavaScript tool.
 - `render_board.py` — builds `dedupe_board.html` from a `dedupe_results.json`.
 
-> **Efficiency contract:** Steps 1, 2, and 4 all return compact JSON via `javascript_tool`. Do NOT
+For full model decoding, board types, and the kit/regex house style, defer to the **reader-kit-lookup**
+skill — this step reuses its logic; it does not replace it.
+
+> **Efficiency contract:** Steps 1, 2, 2b, and 4 all return compact JSON via `javascript_tool`. Do NOT
 > `get_page_text` the queue, the SOR pages, or `/customers` — those full-page dumps are what made the
 > old version burn usage. Fall back to `get_page_text` only for a single field that came back empty.
+> The reader-kit pass costs one extra JS call per SOR (on the page already open) to read the kit
+> table, and adds the `/reader_lookup/index` fetch ONLY when a machine is actually unassigned — if
+> every kit is assigned, Step 2b is skipped entirely. Never the per-model search box.

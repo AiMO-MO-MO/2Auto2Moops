@@ -21,7 +21,7 @@ from core.moops import (
     save_so,
     set_shipment,
     action_add_part,
-    action_add_splicers,
+    action_add_required_parts,
     action_set_tag,
 )
 from core.efs import (
@@ -398,16 +398,17 @@ def run(page, so_id):
             print("[INFO] No products to ship")
     print(f"  [{time.time() - t0:.1f}s]")
 
-    # Step 6: Missing parts -- wire splicers (03-01-43) ALWAYS get added (they stack onto any
-    # existing qty). Reuses the same action_add_splicers the system path uses.
+    # Step 6: Missing parts -- run the SAME analyzer the system path uses. A parts order has no
+    # VACs, so action_add_required_parts' rule-based companions (CARD-03-01, paper, pinpad, SVC)
+    # are all no-ops; only the missing-parts decisions run: wire splicers (03-01-43) stack onto
+    # the existing qty, drilling template (01-05-70) -> qty=1, blocker plates / reader cables /
+    # pedestal / obsolete are skipped, everything else is added. One shared path so the parts
+    # missing-parts logic can't drift behind the system one again.
     if missing:
         print(f"\n--- Step 6: Missing parts ({len(missing)}) ---")
         for m in missing:
             print(f"  {m['part_number']:20s} -> {m['associated_part']:15s} qty={m['qty']:5s} {m['description'][:40]}")
-        action_add_splicers(page)
-        other = [m for m in missing if m.get('associated_part') != '03-01-43']
-        if other:
-            print("[INFO] Non-splicer missing parts above -- review/add manually with --add-part.")
+        action_add_required_parts(page, processor_type='')
 
     # Step 7: Save
     t0 = time.time()
@@ -468,3 +469,13 @@ def run(page, so_id):
         print("    Verify Order -> Submit")
     print("    Work State -> Placed -> Accept SOR")
     print("=" * 60)
+
+    # Append-only audit trail (never breaks the run -- guard arg-building too).
+    try:
+        from core.action_log import append_action_log
+        ship = f"EFS: {efs_ship_via}" if use_efs else ("VUnics" if use_vunics else "manual")
+        append_action_log(so_id, "parts", [f"tag: {tag_value}", f"ship: {ship}"],
+                          tag=tag_value, ship=ship,
+                          missing=[f"{m['associated_part']} x{m['qty']} (for {m['part_number']})" for m in missing] if missing else None)
+    except Exception as e:
+        print(f"[action-log] skipped ({e}) -- run unaffected.")

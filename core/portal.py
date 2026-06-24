@@ -786,6 +786,14 @@ def verify_provisioning(page: Page, cust_id: str, vac_count: int,
 _CUSTOMER_CACHE = None
 
 
+def reset_customer_cache() -> None:
+    """Clear the cached /customers scrape. Called at the start of each system run so the run's
+    dedup scrape is FRESH (a stale cache from a prior run could miss a just-created customer or
+    suggest a colliding next Cust ID), and so next_customer_id can safely reuse that one scrape."""
+    global _CUSTOMER_CACHE
+    _CUSTOMER_CACHE = None
+
+
 def scrape_admin_customers(page, use_cache=False):
     """Scrape the full Admin Portal /customers list -- one nav, all rows.
 
@@ -892,9 +900,12 @@ def lookup_customer_contact(page, cust_id: str) -> dict:
                             "contact_phone": c.get("contact_phone", "")}
                 break  # row found but no contact in the list -- try the detail page
     try:
-        a = read_admin_portal(page, want_pad)
+        # Only the contact fields are needed here -- use the light 3-field read, NOT the heavy
+        # read_admin_portal (features/users/locations). Same single nav, ~10s cheaper. Neither
+        # caller (SaaS handoff, card email) uses the customer name, so dropping it is safe.
+        a = read_admin_contact(page, want_pad)
         if a:
-            return {"cust_id": want_pad, "name": a.get("customer_name", ""),
+            return {"cust_id": want_pad, "name": "",
                     "contact_name": a.get("contact_name", ""),
                     "contact_email": a.get("contact_email", ""),
                     "contact_phone": a.get("contact_phone", "")}
