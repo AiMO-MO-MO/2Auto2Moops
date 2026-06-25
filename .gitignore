@@ -7,7 +7,8 @@ vac_configs/
 
 # Generated / run artifacts
 run.log
-action_log.jsonl   # append-only per-run audit trail; grows locally, persisted via OneDrive
+# append-only per-run audit trail; grows locally, persisted via OneDrive
+action_log.jsonl
 _efs_snippet.js
 intake_board.html
 intake_plan.json
