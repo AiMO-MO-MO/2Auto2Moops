@@ -125,6 +125,18 @@ def _proper_case(s):
     return " ".join(out)
 
 
+_STREET_KEEP_UPPER = {"N", "S", "E", "W", "NE", "NW", "SE", "SW"}
+
+
+def _proper_case_street(s):
+    """Proper-case a dealer ALL-CAPS street but keep compass directionals uppercase:
+    '1210 SPARKMAN DR NW' -> '1210 Sparkman Dr NW'."""
+    if not s:
+        return s
+    return " ".join(w.upper() if w.upper() in _STREET_KEEP_UPPER else w
+                    for w in _proper_case(s).split())
+
+
 def next_customer_id(page):
     """Suggest the next Customer ID: max of the normal '0xxxx' series + 1, zero-padded
     to 5. The misnumbered rows (10347+, 80211) do NOT start with 0, so they're excluded.
@@ -371,7 +383,10 @@ def fill_location(page, cust_id, addr):
         print(f"[WARN] Could not confirm portal customer -- verify the sidebar shows {cust_id} before saving.")
 
     loc_id = addr.get("location_id") or "0100001"
-    street = addr.get("street", "")
+    # Dealers type the SOR address in ALL CAPS -> proper-case street + city like the customer name.
+    # State stays 2-letter (handled upstream); street keeps compass directionals (NW/NE/...) uppercase.
+    street = _proper_case_street(addr.get("street", ""))
+    city = _proper_case(addr.get("city", ""))
     descr = addr.get("customer_name", "")  # Description = just the name (per Matt), not "name - street"
     tz = addr.get("timezone", "")
     seats = addr.get("seats", 0) or 0
@@ -379,7 +394,7 @@ def fill_location(page, cust_id, addr):
     print("\n[PLAN] Add Location (VERIFY before save):")
     print(f"  Location ID    = {loc_id!r}   <-- VERIFY (first=0100001; +1 if existing; 02xxxxx if no cards)")
     print(f"  Street         = {street!r}")
-    print(f"  City           = {addr.get('city', '')!r}")
+    print(f"  City           = {city!r}")
     print(f"  State          = {addr.get('state', '')!r}")
     print(f"  Zip            = {addr.get('zip', '')!r}")
     print(f"  Timezone       = {tz!r}" + ("" if tz else "   <-- set manually"))
@@ -427,7 +442,7 @@ def fill_location(page, cust_id, addr):
           return r;
         }
         """,
-        {"location_id": loc_id, "street": street, "city": addr.get("city", ""),
+        {"location_id": loc_id, "street": street, "city": city,
          "state": addr.get("state", ""), "zip": addr.get("zip", ""), "descr": descr,
          "timezone": tz, "seats": str(seats) if seats else ""},
     )
@@ -998,9 +1013,10 @@ def check_customer_setup(page, cust_id):
 
 
 def next_location_id(page, cust_id, shared=True, from_current_page=False):
-    """Next Location ID under an EXISTING customer. Access-sharing ON -> 01 series
-    (max existing 01 + 1; cards shared/grouped); OFF -> 02 series (separate). VERIFY -- the
-    01-vs-02 choice depends on the SOR's Access Sharing field, which the human confirms.
+    """Next Location ID under an EXISTING customer. Access-sharing ON -> add to the shared 01
+    group (max existing 01 + 1; cards shared/grouped); OFF -> its OWN NEW group = next group after
+    the highest existing (e.g. groups 01/02/03 present -> 0400001). Reads ALL location-id series off
+    the page, not just 01/02. VERIFY -- the choice depends on the SOR's Access Sharing field.
 
     from_current_page=True reads the existing ids off the CURRENT LaundroPortal location index
     (we're already there) instead of navigating to the Admin/cust-id window -- keeps all the
@@ -1015,13 +1031,20 @@ def next_location_id(page, cust_id, shared=True, from_current_page=False):
     ids = page.evaluate(
         r"""() => { const s = new Set();
             document.querySelectorAll('option, td, th, span').forEach(e => {
-                const ms = (e.textContent || '').match(/\b0[12]\d{5}\b/g);
+                const ms = (e.textContent || '').match(/\b0\d{6}\b/g);   // ALL loc-id series (0XXXXXX), not just 01/02
                 if (ms) ms.forEach(m => s.add(m)); });
             return [...s]; }"""
     )
-    series = "01" if shared else "02"
-    nums = [int(x[2:]) for x in ids if x.startswith(series)]
-    nxt = (max(nums) + 1) if nums else 1
-    loc = f"{series}{nxt:05d}"
-    print(f"[LOC] existing location ids {sorted(ids) or '(none)'} -> next ({series} series) = {loc}")
+    if shared:
+        # Access Sharing ON -> shared/grouped cards: add to the 01 group (next number in 01 series).
+        nums = [int(x[2:]) for x in ids if x.startswith("01")]
+        loc = f"01{((max(nums) + 1) if nums else 1):05d}"
+        why = "shared 01 group"
+    else:
+        # Access Sharing OFF -> its own NEW group: highest existing group (01/02/03/...) + 1, loc 0001.
+        # Falls back to the 02 series only when the customer has no locations on file yet.
+        groups = {int(x[:2]) for x in ids}
+        loc = f"{(max(groups) + 1):02d}00001" if groups else "0200001"
+        why = "new group"
+    print(f"[LOC] existing location ids {sorted(ids) or '(none)'} -> next = {loc} ({why})")
     return loc

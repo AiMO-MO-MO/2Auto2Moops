@@ -114,6 +114,15 @@ def determine_pinpad_kit(processor_type: str) -> str:
     return "KIT-P630"
 
 
+# Pinpad hardware by processor family (part numbers from CLAUDE.md's EFS kit map). A combo VAC's
+# missing-parts lists BOTH families; only the order's processor family is correct, so the run
+# skips the other. (Combo full-kit-vs-attachment over-add is fixed in action_add_required_parts
+# rule 5c: a pinpad ATTACHMENT in missing parts drops the rule-based full kit.)
+_PINPAD_PARTS_A35 = {"KIT-A35", "KIT-A35-ATTACHMENT", "03-01-95", "01-02-23", "01-02-24"}
+_PINPAD_PARTS_P630 = {"KIT-P630", "KIT-P630_ATTACHMENT", "KIT-P630-ATTACHMENT",
+                      "03-01-99", "01-02-25", "01-02-27"}
+
+
 # ---------------------------------------------------------------------------
 # Read actions (extract data from the page)
 # ---------------------------------------------------------------------------
@@ -1513,7 +1522,8 @@ def clone_temp_card(page: Page, shortname: str, end_customer_id: str = "",
 
 @timed
 def open_card_design_email(page: Page, card_part_number: str,
-                           contact_name: str = "", contact_email: str = "") -> None:
+                           contact_name: str = "", contact_email: str = "",
+                           source_card: str = "") -> None:
     """
     Open the Card Design Email modal on the SO page, fill it out, but do NOT send.
     Human reviews and clicks Send.
@@ -1521,10 +1531,16 @@ def open_card_design_email(page: Page, card_part_number: str,
     Steps:
       1. Click "Card Design Email" button
       2. Clear CC field
-      3. Update Card Part Number in message body
-      4. Add contact name/email to message if provided
-      5. Select design files (skip anything with "PO" in filename)
-      6. Stop -- human reviews and sends
+      3. Update Card Part Number in message body; on a modify, reference the original card
+         (source_card) so graphics can pull the existing artwork; fill the template's blank
+         Contact Name/Email lines (not appended at the bottom)
+      4. Select design files (skip anything with "PO" in filename)
+      5. Stop -- human reviews and sends
+
+    `source_card` (modify only): the CARD-MD-* already on the SO that's being modified. The
+    template ships Contact Name/Email labels blank; on a modify the contact comes from an Admin
+    lookup (the SOR has no contact), so we fill those existing lines instead of tacking a second
+    contact block onto the end.
     """
     print("[ACTION] Opening Card Design Email...")
 
@@ -1570,11 +1586,35 @@ def open_card_design_email(page: Page, card_part_number: str,
                 # Replace bare "CARD-MD-" (not followed by alphanumeric = incomplete)
                 current_msg = re.sub(r'CARD-MD-(?![A-Z0-9])', card_part_number, current_msg)
 
-            # Add contact info if provided and not already in message
-            if contact_name and contact_name not in current_msg:
-                current_msg += f"\n\nContact Name: {contact_name}"
-            if contact_email and contact_email not in current_msg:
-                current_msg += f"\nContact Email: {contact_email}"
+            # On a modify, point graphics at the original card already on the SO so they can pull
+            # the existing artwork as the base. Insert right after the "Card Part Number:" line
+            # (fall back to prepending). Guard on the "Original Card" label, NOT on source_card in
+            # the text -- the bumped name (OLYMPIA2) contains the original (OLYMPIA) as a substring.
+            if source_card and "Original Card" not in current_msg:
+                orig_line = f"Original Card (modify - use existing artwork): {source_card}"
+                m = re.search(r'(?im)^(Card Part Number:.*)$', current_msg)
+                if m:
+                    current_msg = current_msg[:m.end()] + "\n" + orig_line + current_msg[m.end():]
+                else:
+                    current_msg = orig_line + "\n" + current_msg
+                print(f"[ACTION] Referenced original card for modify: {source_card}")
+
+            # Fill the template's existing "Contact Name:" / "Contact Email:" lines (they ship
+            # blank) instead of appending at the bottom. The old append checked for the value and,
+            # not finding it, tacked a detached contact block onto the end -- which is what showed
+            # up on modify orders, where the contact comes from an Admin lookup. Fall back to
+            # appending only if the label isn't present in the template at all.
+            def _fill_label(msg, label, value):
+                if not value:
+                    return msg
+                pat = re.compile(r'(?im)^(' + re.escape(label) + r'):[ \t]*$')
+                if pat.search(msg):
+                    return pat.sub(lambda mm: f"{mm.group(1)}: {value}", msg, count=1)
+                if value not in msg:
+                    return msg + f"\n{label}: {value}"
+                return msg
+            current_msg = _fill_label(current_msg, "Contact Name", contact_name)
+            current_msg = _fill_label(current_msg, "Contact Email", contact_email)
 
             msg_textarea.fill(current_msg)
             print(f"[ACTION] Message updated with {card_part_number}")
@@ -1865,12 +1905,20 @@ def clean_name(name: str) -> str:
     return name
 
 
+# Kit families that count as "readers" in the tag, besides CR-* reader parts: POS, MDB vending,
+# door access, vending. These live in the SO's "Other Parts" and were previously left out of the
+# "N Readers" / "N Reader Kits" tag count (Matt: 35 readers + 1 KIT-VENDRITE should tag as 36).
+READER_KIT_PREFIXES = ("KIT-POS", "KIT-VENDRITE", "KIT-MDBVENDING", "KIT-VENDING", "KIT-DOORACCESS")
+
+
 def build_tag(products: list, customer_name: str,
               dealer_name: str = "", is_route: bool = False) -> str:
     """
     Build the tag string from products on the SO.
     System: "2 VAC07, 1 VAC02, 4 Readers (Customer Name)"
     Route:  "1 VAC02, 19 Readers (Dealer - Location)"  -- name AND address
+    The "N Readers" count includes CR-* readers PLUS reader-equivalent kits (POS, MDB vending,
+    door access, vending) from Other Parts -- see READER_KIT_PREFIXES.
     """
     vac_counts = {}  # dict preserves insertion order since Python 3.7
     reader_count = 0
@@ -1881,7 +1929,8 @@ def build_tag(products: list, customer_name: str,
         if pn.startswith("VAC"):
             prefix = pn.split("-")[0]  # VAC07, VAC08, etc.
             vac_counts[prefix] = vac_counts.get(prefix, 0) + qty
-        elif pn.startswith("CR-"):
+        elif pn.startswith("CR-") or pn.startswith(READER_KIT_PREFIXES):
+            # CR-* readers PLUS reader-equivalent kits (POS / MDB vending / door access / vending)
             reader_count += qty
 
     parts = []
@@ -2103,6 +2152,13 @@ def action_add_required_parts(page: Page, processor_type: str = None,
     # Track what we're already adding to avoid duplicates
     already_adding = {part.upper() for part, qty in to_add}
 
+    # Wrong-processor pinpad parts: a combo VAC's missing-parts lists BOTH the A35 (Fortis) and
+    # P630 (Stripe) pinpad options; keep only the order's processor family (Matt). VAC orders only.
+    wrong_pinpad = set()
+    if vac_count > 0:
+        wrong_pinpad = (_PINPAD_PARTS_P630 if determine_pinpad_kit(processor_type or "") == "KIT-A35"
+                        else _PINPAD_PARTS_A35)
+
     for m in missing:
         mp = m["part"].strip()
         mp_upper = mp.upper()
@@ -2151,6 +2207,15 @@ def action_add_required_parts(page: Page, processor_type: str = None,
             print(f"[SKIP] {mp} qty={mq} — already on order")
             continue
 
+        # 2b. Wrong-processor pinpad part — MOOPS lists both A35 and P630 options on a combo VAC;
+        # keep only the order's processor family. (The combo full-kit-vs-attachment over-add is
+        # handled in rule 5c below: an attachment in missing parts drops the rule-based full kit.)
+        if mp_upper in wrong_pinpad:
+            fam = "Fortis/A35" if mp_upper in _PINPAD_PARTS_A35 else "Stripe/P630"
+            flagged.append(f"  SKIPPED: {mp:15s} qty={mq:3d}  — {fam} pinpad part, wrong processor for this order")
+            print(f"[SKIP] {mp} qty={mq} — wrong-processor pinpad part")
+            continue
+
         # 3. "OLD VERSION" / "OBSOLETE" in description — outdated mapping. MOOPS often disables
         # the Add-To-Order button for these (a disabled button hung a run), so never auto-add.
         if "OLD VERSION" in desc_upper or "OBSOLETE" in desc_upper:
@@ -2186,6 +2251,20 @@ def action_add_required_parts(page: Page, processor_type: str = None,
         if mp_upper == "01-05-70":
             print(f"[ADD] {mp} qty=1 (drilling template — reusable; MOOPS asked for {mq})")
             mq = 1
+
+        # 5c. Combo VAC: a pinpad ATTACHMENT in missing parts means the VAC ships with the pinpad
+        # integrated -- it needs the attachment (mounting + butt cable), NOT the full pinpad kit the
+        # rule-based logic queued above. Drop that full kit (Matt: "adding the P630 attachment means
+        # we don't need the Stripe P630 we typically add"). The wrong-processor rule (2b) already
+        # dropped the other family's attachment, so this one matches the order's processor family.
+        # The attachment itself still gets added by rule 6 below (no `continue`).
+        if mp_upper in ("KIT-P630_ATTACHMENT", "KIT-P630-ATTACHMENT", "KIT-A35-ATTACHMENT"):
+            full_kit = determine_pinpad_kit(processor_type or "").upper()  # KIT-P630 / KIT-A35
+            n_before = len(to_add)
+            to_add[:] = [(p, q) for (p, q) in to_add if p.upper() != full_kit]
+            if len(to_add) < n_before:
+                already_adding.discard(full_kit)
+                print(f"[INFO] Combo VAC ({source}) needs {mp} -> dropping rule-based full kit {full_kit}")
 
         # 6. Everything else — add it
         svc_idx = next((i for i, (p, q) in enumerate(to_add) if p.upper() == "SVC-LAUNDROMAT"), None)
@@ -2538,6 +2617,66 @@ def read_config_file_resources(page: Page) -> list:
     except Exception as e:
         print(f"[READ] Could not read config file resources ({e})")
         return []
+
+
+# Card shipping charge ("Cost" column of the card shipping table, keyed by quantity). Mitech covers
+# shipping for the first 5000 cards on a system order; cards beyond 5000 are charged on the EXCESS.
+_CARD_SHIP_COST = {1000: 125.00, 2000: 225.00, 3000: 285.00, 5000: 290.00, 6000: 324.00,
+                   10000: 500.00, 15000: 750.00, 20000: 580.00, 50000: 1350.00}
+
+
+def action_add_card_shipping(page: Page) -> None:
+    """SYSTEM orders only: the first 5000 cards ship free; cards beyond 5000 are charged. If the SO
+    has VACs (system) AND total card qty > 5000, add a 'SHIPPING' line (qty 1) priced at the charge
+    for the EXCESS (total - 5000) from the card shipping table (Air default; Sea only if comments
+    ask). Fill-only -- human verifies the price. Matt: 10000 cards -> excess 5000 -> $290."""
+    has_vac = False
+    card_qty = 0
+    for row in page.locator('tr[id^="existing_part_order_"], tr[id^="new_part_order_"]').all():
+        try:
+            pn = row.locator('th[scope="row"] a')
+            if pn.count() == 0:
+                continue
+            part = pn.first.inner_text().strip().upper()
+            if part.startswith("VAC"):
+                has_vac = True
+            elif part == "SHIPPING":
+                print("[CARDS] SHIPPING line already on the SO -- not adding another.")
+                return
+            elif part.startswith("CARD-") and part != "CARD-03-01":
+                inp = row.locator('input').all()
+                if inp and inp[0].input_value().isdigit():
+                    card_qty = max(card_qty, int(inp[0].input_value()))
+        except Exception:
+            continue
+    if not has_vac:
+        return  # cards-only order -- the >5000 shipping line is a SYSTEM-order rule
+    if card_qty <= 5000:
+        return
+    excess = card_qty - 5000
+    charge = _CARD_SHIP_COST.get(excess)
+    print(f"\n[CARDS] >5000 cards ({card_qty}) on a system order -- adding SHIPPING line for the "
+          f"{excess} cards over the free 5000.")
+    action_add_part(page, "SHIPPING", 1)
+    set_price = None
+    for row in page.locator('tr[id^="existing_part_order_"], tr[id^="new_part_order_"]').all():
+        try:
+            pn = row.locator('th[scope="row"] a')
+            if pn.count() > 0 and pn.first.inner_text().strip().upper() == "SHIPPING":
+                inputs = row.locator('input').all()
+                if charge is not None and len(inputs) >= 2:
+                    inputs[1].click()
+                    inputs[1].fill(f"{charge:.2f}")
+                    set_price = charge
+                break
+        except Exception:
+            continue
+    if set_price is not None:
+        print(f"[CARDS] SHIPPING price set to {set_price:.2f} (Air default; use the Sea price if the "
+              "SOR comments ask). VERIFY at the save pause.")
+    else:
+        print(f"[CARDS] [FLAG] No table price for excess {excess} -- SHIPPING line added; set the "
+              "price from the card shipping table at the save pause (VERIFY).")
 
 
 @timed

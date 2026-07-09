@@ -18,6 +18,24 @@
 > pauses — diminishing returns on speed; next high-value work is reliability (validity-field helper)
 > not speed.
 
+> **2026-06-24 (later, post-merge — UNCOMMITTED batch; live-verified on SO-20293/20314/20316).**
+> - **Tag kit-count:** SYSTEM tag folds POS/MDB-vending/door-access/vending into "N Readers"
+>   (35+1 VENDRITE=36); **PARTS tag ITEMIZES** them by type (POS Kit, Door Access Kits) — parts stay
+>   DEFINED, not rolled into "Reader Kits" (the parts fold was tried then reverted).
+> - **Add-Location** proper-cases city + street (HUNTSVILLE→Huntsville; keeps NW/NE); state stays 2-letter.
+> - **Existing customers no longer get an auto-added API user or LP user.** The gap-fill false-positived
+>   on Portal-2.0-token customers (POS access read as "Financial Status") → a duplicate API user + LP user.
+>   **SUPERSEDES the 2026-06-09 "cust-page FILLS gaps" note below** — now report only; run `apiuser <cust>`
+>   if one is genuinely missing.
+> - **`next_location_id`** reads ALL loc-id series (was 01/02 only) and Access-Sharing-No opens the next
+>   NEW group (01/02/03 → 0500001; was wrongly 0200002).
+> - **Cross-processor pinpad** parts filtered (a Stripe order skips A35 parts / vice-versa). The combo
+>   full-kit-vs-attachment over-add is still OPEN (a combo adds KIT-P630 on top of the attachment).
+> - **>5000-card SHIPPING line** (system orders only): first 5000 free, charge the excess at the table
+>   "Cost" (10000 → excess 5000 → $290); fill-only.
+> - Tests added for the system-fold + parts-itemize tag behaviors. **Before committing: restart the
+>   console and run `python -m unittest tests.test_pure_helpers`.**
+
 > `system <id>` is the live idempotent run. **2026-06-09: the EXISTING-customer flow was proven
 > end-to-end on SO-19946** (Wash'n Up 00720, second location): gap-fill on the cust page (Stripe
 > feature), new LP location create (with operator rename picked up by re-run), Stripe merchant +

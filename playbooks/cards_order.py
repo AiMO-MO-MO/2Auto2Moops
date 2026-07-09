@@ -180,9 +180,13 @@ def run(page, so_id, shortname=None):
         print("\n--- Generic cards — no card workflow needed ---")
         print("[INFO] Generic cards ship with the system or via EFS. Done.")
     else:
-        # Pass the SOR we already read and the shortname override (if any).
+        # Pass the SOR we already read and the shortname override (if any). Thread the SO
+        # products + customer name too — we're freshly post-save on the SO, so _do_cards skips
+        # its entry navigate + the two re-reads (one fewer round-trip to MOOPS).
         # _do_cards handles new/modify/reprint/exists/none uniformly.
-        card_result = _do_cards(page, so_id, cust_id, sor=sor_data, shortname=shortname)
+        card_result = _do_cards(page, so_id, cust_id, sor=sor_data, shortname=shortname,
+                                products=so_data["products"],
+                                cust_name=so_data["customer_name"])
 
     # Summary
     elapsed = time.time() - t_start

@@ -5,6 +5,7 @@ from core.efs import expand_kit_for_efs, map_sor_to_efs_shipping, route_products
 from core.moops import build_tag
 from core.order_plan import audit_hardware_requirements, build_system_rerun_plan
 from playbooks.cards_order import build_cards_tag
+from playbooks.parts_order import build_parts_tag
 from playbooks.salesforce import build_plan, opportunity_name, to_e164
 from run import (
     _apply_config_attachment_signal,
@@ -128,6 +129,31 @@ class OrderTagTests(unittest.TestCase):
             "MAIN STREET LAUNDRY",
         )
         self.assertEqual(tag, "2 VAC07, 1 VAC02, 4 Readers (Main Street Laundry)")
+
+    def test_system_tag_counts_reader_equiv_kits(self):
+        # CR-* readers PLUS reader-equivalent kits (POS / MDB vending / door access / vending) count.
+        tag = build_tag(
+            [
+                {"part_number": "VAC07-42-20", "qty": "2"},
+                {"part_number": "CR-10-150-00", "qty": "35"},
+                {"part_number": "KIT-VENDRITE-01", "qty": "1"},
+            ],
+            "WASH ZONE",
+        )
+        self.assertEqual(tag, "2 VAC07, 36 Readers (Wash Zone)")
+
+    def test_parts_tag_itemizes_kits_not_folded(self):
+        # Parts orders itemize kits by TYPE -- they are NOT folded into the Reader Kit count
+        # (that fold is system-tag only). 33 CR readers stay 33; door access is listed on its own.
+        tag = build_parts_tag(
+            [
+                {"part_number": "CR-10-150-00", "qty": "33", "description": ""},
+                {"part_number": "KIT-DOORACCESS-02", "qty": "2", "description": "Door Access Kit"},
+            ],
+            "TEST CO",
+        )
+        self.assertIn("33 Reader Kits", tag)   # NOT 35 -- door access is not folded into the count
+        self.assertIn("Door Access", tag)      # listed as its own kit type
 
 
 class LocationMatchTests(unittest.TestCase):

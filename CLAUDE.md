@@ -166,10 +166,10 @@ work itself. Do NOT run it — it opens the ITF Jira form and mis-marks card tas
 
 ## Assembly Week Scheduling
 
-- **45/week hard max**, **30/week soft cap** (30-40 = yellow, 40-45 = red/emergency only)
+- **50/week hard max**, **35/week soft cap** (35-40 = yellow, 40-50 = red/emergency only). Caps are named constants in `core/schedule.py` (`HARD_MAX`/`SOFT_CAP`/`RED_START`).
 - **FIFO** — first available week under soft cap, not lead-time math
 - Required date → work backwards (delivery minus ~2 weeks shipping)
-- EXPEDITED orders can use the 35-45 range
+- EXPEDITED orders can use the 35-50 range
 - **Required Date on SO** = Friday of assembly week (SOP). No required date = Saturday.
 
 ## MOOPS Selectors (validated)
@@ -352,17 +352,36 @@ None. Filters `available` to future-only before taking min.
   "modify"); new-customer dealer-record TODO only prints when the End Customer didn't link; append-only
   **action log** `action_log.jsonl` + `history <id>` verb; startup menu reconciled (adds ll/sf/sf-search/
   cardmod/history); moops-dedupe skill gained a **reader-kit step** (gated on a missing kit). Unified
-  single-entry run is **PARKED** by choice (memory `unified-run-parked`). The >5000 card-shipping line is
-  **system-order only** (memory `cards-shipping-line-system-only`).
+  single-entry run is **PARKED** by choice. The >5000 card-shipping line is **system-order only**.
 - Money/duplication guard (PO / Stripe merchant / intro email check-before-create) — proposed, not built.
-- **Missing-parts over-add on combo VACs** — a VAC with an integrated pinpad (e.g. VAC03 combo) shouldn't
-  get a separate pinpad kit/attachment added; the missing-parts step is too eager. (Open.)
+- **Tag kit-count includes non-reader kits — SYSTEM tag only (BUILT 2026-06-24).** The **system** tag's
+  "N Readers" count adds POS (`KIT-POS-*`), MDB Vending (`KIT-VENDRITE-*`/`KIT-MDBVENDING-*`), Door Access
+  (`KIT-DOORACCESS-*`), and Vending (`KIT-VENDING-*`) on top of the `CR-*` readers (`READER_KIT_PREFIXES` in
+  core/moops). On the SO readers are `CR-*`; these kits stay `KIT-*`, so it's CR count + those KIT families.
+  E.g. 35 readers + 1 KIT-VENDRITE-01 → "36". **The PARTS tag does NOT fold them** — it lists each kit by
+  type via `KIT_NAMES` ("POS Kit", "Door Access Kits", …); Matt: parts must stay DEFINED, not rolled into
+  "Reader Kits" (the fold was reverted for parts on 2026-06-24).
+- **Cross-processor pinpad parts (BUILT 2026-06-24).** A combo VAC's missing-parts lists BOTH the A35
+  (Fortis) and P630 (Stripe) pinpad options; the run now keeps only the order's processor family and skips
+  the other (`_PINPAD_PARTS_A35` / `_PINPAD_PARTS_P630` in core/moops; VAC orders only). E.g. SO-20227
+  VAC03-52-20 Stripe combo no longer pulls in `03-01-95` / `01-02-24` (A35).
+- **Combo full-kit over-add (BUILT 2026-06-29).** A combo VAC (integrated pinpad, e.g. VAC03-52-20) was
+  getting the rule-based FULL pinpad kit (KIT-P630) on top of the correct attachment (KIT-P630_ATTACHMENT).
+  Fixed in `action_add_required_parts` rule 5c: when a pinpad ATTACHMENT (KIT-P630_ATTACHMENT/-ATTACHMENT/
+  KIT-A35-ATTACHMENT) appears in missing parts, the VAC is treated as a combo and the rule-based full kit
+  (`determine_pinpad_kit`) is dropped from the add list; the attachment itself is still added. Verify on the
+  next live combo order (SO-20275 was the repro).
 - **LaundroPortal location-index phantom row** — `next_location_id` reads `0100001` for a zero-location
   customer, so the suggestion is off; the saved-id re-read + MOOPS's duplicate-id block are the safety net. (Open.)
 - **SOR→SO change-request reconciler** — read-only, suggest-only; parse the SOR change-log "Added:" items,
-  confirm against the SO (target models live in the description). See memory `sor-so-change-request-reconcile`.
+  confirm against the SO (target models live in the description).
 - **Task 6 (SaaS) = Salesforce** — not in the Admin/LP flow; the run leaves it To Do.
-- Still queued: >5000 card-shipping line, rules engine, parts auto-pricing, money-guard.
+- **>5000 card-shipping line (BUILT 2026-06-24).** System orders only: first 5000 cards ship free, the
+  rest are charged. `action_add_card_shipping` (core/moops) — when the SO has VACs AND total card qty > 5000,
+  adds a `SHIPPING` line (qty 1) priced at the `_CARD_SHIP_COST` table value for the EXCESS (total − 5000),
+  Air default (Sea if comments ask); fill-only, human verifies. Wired into `_do_cards` new/modify block
+  before the save. 10000 cards → excess 5000 → $290. Off-tier excess → line added, price flagged for manual.
+- Still queued: rules engine, parts auto-pricing, money-guard.
 
 **Dev-env note:** the OneDrive mount serves the sandbox **stale/truncated** copies of just-edited files,
 so `py_compile` in the workspace often fails on unchanged lines — the file tools see the true file. Rely

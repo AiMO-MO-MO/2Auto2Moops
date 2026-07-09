@@ -62,6 +62,16 @@ value is reflecting the current state of both systems at decision time.
 Do NOT fan out one query per order per signal, and don't narrate every hop — gather, batch, present.
 A run of N orders should be: one queue read + one read per SOR + ~4 SF calls + one Admin call + render.
 
+**Token discipline (this is what blows up usage — rules, not tips):**
+- **Run the bundled `references/*.js` scripts as-is.** Do NOT hand-write a big custom extractor, and do NOT
+  paste the full script text into every SOR call in a `browser_batch` — repeating a ~2KB script across N
+  SORs is N× the cost. Each per-SOR call should carry the smallest code that returns the fields.
+- **Resolved means done.** The moment an order matches by **CUSTID or email**, STOP querying it — do NOT run
+  its phone/name SOSL and do NOT re-confirm. Name SOSL is the single costliest SF call (fuzzy → returns every
+  near-name across all states); run it ONLY for orders with no id/email match, selecting minimal fields.
+- **Long chat / big batch → fresh conversation.** Cost scales with the whole prior context, so the same run
+  at the tail of a long session can cost several times more than in a clean one.
+
 1. **Gather all in-scope orders' signals first** (Step 1–2), then dedupe them together.
 2. **CUSTID short-circuit:** orders that name an Existing End Customer id are essentially resolved by
    one ID lookup — don't run the fuzzy fan-out for them.
@@ -172,7 +182,8 @@ CUSTID format varies — MOOPS pads to 5 digits (`00378`); some SF rows hold it 
 
 **Tier 1/2 — contact / name / address.** Batch email across all orders with one `Contact ... WHERE
 Email IN (...)` and one `Lead ... WHERE Email IN (...)` (see "Run efficiently"). Then use the SOSL
-templates below **only for orders still unresolved** (skip an order already matched by CUSTID/email).
+templates below **only for orders still unresolved** — NEVER run the name/phone SOSL for an order already
+matched by CUSTID or email (name SOSL is the costliest call: fuzzy, returns every near-name across states).
 Templates:
 ```sql
 SELECT Id, Name, Email, Phone, Account.Name, Account.LW_account_ID__c FROM Contact WHERE Email = '<email>'
@@ -257,6 +268,11 @@ Example:
 To produce a visual board, assemble a `dedupe_results.json` (list of orders, each with `admin` and
 `sf` blocks of matches + a `verdict`/`flag`) and run `python render_board.py dedupe_results.json
 dedupe_board.html` (bundled in this folder). Present the HTML file.
+
+**Order the `orders` array in live OR-queue (FIFO) order — the same top-to-bottom order the
+order-requests page lists them. Do NOT re-sort by verdict** (Matt: the board should scan like the OR
+page). The renderer preserves the given order; it colors each card by verdict — EXISTING/flag get a
+bold solid verdict chip + a thick left accent bar so existing hits jump out, NEW stays muted.
 
 ## Guardrails
 

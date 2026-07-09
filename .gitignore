@@ -25,3 +25,20 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
+
+# Office / LibreOffice lock files
+.~lock.*#
+
+# ── SF Deduper — a SEPARATE project that shares this base folder; keep its files OUT of this repo ──
+sf_audit/
+sf_data.js
+sor_dedupe.sql
+SF_*.xlsx
+SF_*.csv
+Shipped_Orders_*.xlsx
+
+# Generated dedupe-board data (regenerated per run; dedupe_board.html is tracked -- `git rm --cached` it
+# to stop tracking when the intake work moves to its own branch)
+dedupe_data.js
+dedupe_keys.json
+dedupe_board.html

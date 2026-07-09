@@ -617,23 +617,29 @@ def _do_adduser(page, so_id, cust_id, sor=None):
                            {"contact_name": cn, "contact_email": ce, "contact_phone": cp})
 
 
-def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id=""):
+def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id="",
+              products=None, cust_name=None):
     """Card workflow — single implementation used by system run AND cards-order playbook.
       new     -> clone + add + design email    -> returns "new"     (task 3 done)
       modify  -> version-bump clone + email    -> returns "new"     (task 3 done)
       reprint -> Create PO + PO email          -> returns "reprint" (task 5 done)
       none / generic / other -> nothing        -> returns "none"
     `sor` threaded from caller avoids re-fetching the SOR.
+    `products` + `cust_name` threaded from caller (already-on-SO after a save) skip the entry
+    navigate + the two SO reads — the cards-order playbook passes them post-save. When either is
+    missing we read fresh (system-run callers that aren't guaranteed to be on the SO).
     `shortname` overrides the auto-generated card shortname (cards-order CLI arg).
     `location_id` sets the card's Card Ownership Location when known (system chain after the
     location is created); blank in card-only/modify, so those clone End-Customer only."""
     import time as _t
     from core.moops import (read_customer_name, read_sor_data, generate_card_shortname,
-                            clone_temp_card, action_add_card_to_so, save_so, open_card_design_email,
+                            clone_temp_card, action_add_card_to_so, action_add_card_shipping,
+                            save_so, open_card_design_email,
                             read_products, read_card_end_customer, create_card_po, open_po_email)
-    navigate_to_so(page, so_id)
-    cust_name = read_customer_name(page)
-    products = read_products(page)
+    if products is None or cust_name is None:
+        navigate_to_so(page, so_id)
+        cust_name = read_customer_name(page)
+        products = read_products(page)
     if sor is None:
         sor = read_sor_data(page)
     design = (sor.get("card_design_type", "") or "").strip()
@@ -705,8 +711,16 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id=""):
             return "none"
         navigate_to_so(page, so_id)
         action_add_card_to_so(page, card_part)
+        action_add_card_shipping(page)  # system order + >5000 cards -> SHIPPING line (before the save)
         save_so(page, accept_sor=False, clear_customer_location_blocker=False)
-        open_card_design_email(page, card_part, contact_name=c_name, contact_email=c_email)
+        # On a modify, the original card already on the SO (read before the swap, so `products`
+        # still holds it) is the artwork source -- reference it in the email for graphics.
+        source_card = ""
+        if ct == "modify":
+            source_card = next((p["part_number"] for p in products
+                                if p["part_number"].upper().startswith("CARD-MD-")), "")
+        open_card_design_email(page, card_part, contact_name=c_name, contact_email=c_email,
+                               source_card=source_card)
         try:
             input("\n[CHAIN] Review and send the card design email, then press Enter.")
         except (EOFError, KeyboardInterrupt):
@@ -1579,14 +1593,16 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                     sor["contact_email"] = chk.get("contact_email", "")
                 if not sor.get("contact_phone"):
                     sor["contact_phone"] = chk.get("contact_phone", "")
-            # But an "existing" customer can be UNPROVISIONED (e.g. a record we just created and
-            # grabbed via dedup): if the POS API user is missing, that's a real gap to fill, not
-            # an existing-setting change. fill_api_user is fill-only (human reviews + saves) and
-            # only ticks the Stripe flag if it's off.
+            # Matt's rule: if the customer is EXISTING, do NOT auto-add an API user. Existing
+            # accounts already have API access set up how they need it, and the legacy POS check
+            # false-negatives on customers whose access reads e.g. "Financial Status" / lives in a
+            # Portal-2.0 token (SpinXpress 00121 had POS but the dropdown said "Financial Status"),
+            # which created a DUPLICATE API user AND an unwanted LP user. Report only, never fill ->
+            # `filled` stays False -> the Add User step (gated on `existing and not filled`) also
+            # skips. If a truly unprovisioned existing customer needs one, run `apiuser <cust>`.
             if chk is not None and not chk.get("pos"):
-                print("[CHAIN] No POS API user on this customer -- filling the gap (fill-only).")
-                provisioning.fill_api_user(page, cust_id, is_fortis=is_fortis)
-                filled = True
+                print(f"[CHAIN] Existing customer -- NOT adding an API user (run `apiuser {cust_id}` "
+                      "only if one is genuinely missing).")
             elif chk is not None and not chk.get("stripe"):
                 print("[CHAIN] Stripe reporting flag off -- leaving existing customer settings; "
                       "use `apiuser` if it needs setting.")
@@ -1626,7 +1642,7 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
                 acc = (sor.get("access_sharing", "") if sor else "").strip().lower()
                 shared = False if acc.startswith("no") else True
                 if acc:
-                    print(f"[CHAIN] Access Sharing = {acc!r} -> {'01 (grouped)' if shared else '02 (new group)'} series")
+                    print(f"[CHAIN] Access Sharing = {acc!r} -> {'shared 01 group' if shared else 'its own new group (next after the highest existing)'}")
                 else:
                     print("[CHAIN] Access Sharing not read -- defaulting to 01 (grouped) series; VERIFY.")
                 # We're already on the LP location index (just read it above) -- compute the
@@ -1748,6 +1764,13 @@ def _do_provision_chain(page, so_id, cust_id, existing=False, verify_only=False,
         # the card's Card Ownership Location gets set alongside the End-Customer. Empty for
         # not-yet-resolved cases (e.g. task 8 already done) -> clone sets End-Customer only.
         card_result = _do_cards(page, so_id, cust_id, sor=sor, location_id=loc_id)
+        # Record the card work so it shows in the end-of-run "DID:" summary (was omitted).
+        _card_did = {"new": "cloned + added new-design card + drafted design email",
+                     "modify": "cloned + added modified card + drafted design email",
+                     "reprint": "created card PO + drafted PO email (reprint)",
+                     "exists": "card already on the SO (prior touch) -- no new card added"}.get(card_result)
+        if _card_did:
+            write_actions.append(_card_did)
     elif ({3, 4, 5} & todo) and card_kind == "none":
         print("\n--- Cards: skip (SOR has no actionable card design type) ---")
         for n in (3, 4, 5):
@@ -2221,13 +2244,8 @@ def _start_console(parser):
     print("\n2AUTO2MOOPS console -- the browser opens once and stays open across commands.")
     print("Every run is FILL-ONLY: it fills the forms and pauses; you review and Save.\n")
     print("MAIN RUNS")
-    print("  system <id>   (s)    One idempotent run -- snapshot the SO + SOR, then do whatever is")
-    print("                       still To Do: resolve the customer (grab an existing match by")
-    print("                       dedup, or create a new one), tag + assembly week + hardware,")
-    print("                       Portal location, user, Stripe (skipped for Fortis), intro,")
-    print("                       cards, link End Customer (+ dealer association if needed),")
-    print("                       config files, task checklist.")
-    print("                       Route / Multi-Housing is auto-detected -> hardware + tag only.")
+    print("  system <id>   (s)    Full system run -- all remaining To-Do steps (customer, tag, schedule,")
+    print("                       hardware, location, user, Stripe, cards, config, tasks). Route auto-detected.")
     print("  parts  <id>   (p)    Parts / readers order (EFS / VUnics / Slack)")
     print("  cards  <id> [name] (c)   Cards-only order")
     print("  cardmod <id>  (m)    Card-modify -- address/design change on an existing card")
