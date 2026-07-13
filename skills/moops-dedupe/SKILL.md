@@ -265,9 +265,16 @@ Example:
 > "Laundromart of Four Corners" + owner's phone/email, **Cents Location ID 513** (live Cents).
 > → Don't auto-create; reconcile manually. Also not in Laundroworks (needs provisioning).
 
-To produce a visual board, assemble a `dedupe_results.json` (list of orders, each with `admin` and
-`sf` blocks of matches + a `verdict`/`flag`) and run `python render_board.py dedupe_results.json
-dedupe_board.html` (bundled in this folder). Present the HTML file.
+The board is the static `dedupe_board.html` in the repo, filled by data files (see
+`../../DEDUPE_RUNBOOK.md`): `python run.py intake` writes `dedupe_data.js` (queue + Admin/LW) AND a
+pending `sf_data.js` skeleton keyed to the SORs; the **SF step** fills each SOR's `matches` in
+`sf_data.js`. Reload the board to see results. (The old `render_board.py` / `dedupe_results.json`
+renderer is retired — do not use it.)
+
+**The board is a static HTML FILE, never a Cowork artifact.** Do NOT use `create_artifact` /
+`update_artifact` for it. If you are running only the **SF step** for an existing intake board, your
+sole output is to **write `sf_data.js`** into the repo (the board reads it on refresh) — do not build
+or edit an artifact. Edit `dedupe_board.html` itself only when the board's layout needs to change.
 
 **Order the `orders` array in live OR-queue (FIFO) order — the same top-to-bottom order the
 order-requests page lists them. Do NOT re-sort by verdict** (Matt: the board should scan like the OR
@@ -291,7 +298,8 @@ bold solid verdict chip + a thick left accent bar so existing hits jump out, NEW
 - `references/reader_match.js` — Step 2b: one `/reader_lookup/index` fetch + local regex match for all models.
 - `references/sf_queries.md` — validated SOQL/SOSL patterns with real sample output.
 - `references/admin_dedupe.js` — the live Admin extraction + match script for the JavaScript tool.
-- `render_board.py` — builds `dedupe_board.html` from a `dedupe_results.json`.
+- (retired) `render_board.py` / `render_dedupe_board.py` — old renderers; the board is now the
+  static `dedupe_board.html` in the repo root, filled by `dedupe_data.js` + `sf_data.js`.
 
 For full model decoding, board types, and the kit/regex house style, defer to the **reader-kit-lookup**
 skill — this step reuses its logic; it does not replace it.

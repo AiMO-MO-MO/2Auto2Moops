@@ -91,8 +91,10 @@ The board shows you the evidence; **you make the new-vs-existing call.** It neve
    contact name > store name**. An address hit on a **Custom_Location__c** means the *site
    already exists in SF* — the strongest signal.
 
-4. **Write a FRESH `sf_data.js`** in the project root — replace the whole file, covering
-   **every** order in `dedupe_keys.json` (don't append to a prior run's file). Keyed by `sor_no`:
+4. **FILL the `sf_data.js` that `intake` already wrote** — don't build the file from scratch.
+   intake pre-writes it as a pending skeleton, one key per SOR: `{ "SOR-X": { "pending": true,
+   "matches": [] } }`. Your job per SOR: set its `matches` array and drop `pending` (or set false).
+   Do **not** add/remove SOR keys or change the schema — the structure already exists. Shape:
    ```js
    window.SF_DATA = {
      "SOR-XXXXX": { matches: [

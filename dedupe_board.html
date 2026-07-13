@@ -193,10 +193,10 @@ function render(){
       +(contact?esc(contact):'<span class="oi-none">no contact on SOR</span>')+'</div>'
       +'<div class="cols">'
       +sysBlock('Admin Portal (live)', admin.verdict, admin.matches, false, false)
-      +sysBlock('Salesforce (live)', sfV, sfEntry?sfEntry.matches:[], !sfEntry, true)
+      +sysBlock('Salesforce (live)', sfV, sfEntry?sfEntry.matches:[], (!sfEntry||sfEntry.pending), true)
       +'</div>'+kit+'</div>';
   });
-  const sfN=Object.keys(sf).length;
+  const sfN=Object.values(sf).filter(e=>e&&!e.pending).length;
   sub.innerHTML=orders.length+' system orders &middot; Admin: '+ex+' existing, '+po+' possible, '+nw+' new'
     +' &middot; SF: '+(sfN?sfN+' checked':'<b>not run</b>')+' &middot; generated '+esc(data.generated_at||'');
   content.innerHTML=cards.join('');

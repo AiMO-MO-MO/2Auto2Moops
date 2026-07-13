@@ -809,8 +809,19 @@ def _emit_board_data(orders, generated_at):
                 + ";\n")
     with open(os.path.join(REPO_ROOT, "dedupe_keys.json"), "w", encoding="utf-8") as f:
         json.dump(keys, f, indent=2)
+    # Pre-write the sf_data.js STRUCTURE (a pending skeleton keyed to this run's SORs) so the
+    # Claude SF step only FILLS each SOR's matches -- it never has to invent the file/shape.
+    # Overwritten each intake (fresh queue); the board shows "not run" for pending entries.
+    sf_skeleton = {o["sor_no"]: {"pending": True, "matches": []}
+                   for o in board_orders if o.get("sor_no")}
+    with open(os.path.join(REPO_ROOT, "sf_data.js"), "w", encoding="utf-8") as f:
+        f.write("// window.SF_DATA -- STRUCTURE written by intake (pending skeleton, one key per SOR).\n"
+                "// The Claude SF step FILLS each SOR's `matches` (and clears `pending`); it must not\n"
+                "// change the schema or add/remove SOR keys. See DEDUPE_RUNBOOK.md.\n"
+                "window.SF_DATA = " + json.dumps(sf_skeleton, indent=2) + ";\n")
     print(f"  dedupe_data.js: {len(board_orders)} system orders + Admin dedupe")
     print(f"  dedupe_keys.json: {len(keys)} keys for the SF step")
+    print(f"  sf_data.js: pending skeleton for {len(sf_skeleton)} SORs (SF step fills it)")
 
 
 # ---------------------------------------------------------------------------
