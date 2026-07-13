@@ -2,11 +2,11 @@
 Assembly week scheduling — capacity reading, FIFO picking, date parsing.
 
 Capacity rules:
-  - 45 VACs/week hard max
-  - 35 VACs/week soft cap (leave 10 for EXPEDITED/emergency)
+  - 50 VACs/week hard max
+  - 35 VACs/week soft cap (FIFO target; leaves 15 for EXPEDITED/emergency)
   - Weights: VAC01-06 = 0.5, VAC07-08 = 1.0 (touchscreen = full slot)
   - FIFO: first available week with room under soft cap
-  - EXPEDITED orders can use the 35-45 emergency buffer
+  - EXPEDITED orders can use the 35-50 emergency buffer
   - Required date: work backwards (delivery date minus ~2 weeks shipping)
 """
 
@@ -16,6 +16,12 @@ import re
 from datetime import datetime, timedelta
 
 from core.moops import decode_vac
+
+# Weekly assembly capacity (weighted VACs). Single source of truth -- pick_assembly_week and
+# print_schedule both read these so the caps can't drift apart across functions.
+HARD_MAX = 50    # hard ceiling; a week at HARD_MAX is FULL
+SOFT_CAP = 35    # FIFO target for normal orders; SOFT_CAP..HARD_MAX is the EXPEDITED/emergency buffer
+RED_START = 40   # SOFT_CAP..RED_START = yellow; RED_START..HARD_MAX = red (emergency only)
 
 _INTAKE_PLAN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "intake_plan.json")
@@ -95,14 +101,14 @@ def pick_assembly_week(schedule: list, required_date: str = None,
     """
     Auto-pick the best assembly week.
 
-    Capacity tiers:
-      - 30 = soft cap (FIFO target — move to next week once hit)
-      - 40 = yellow zone (emergency / expedited buffer)
-      - 45 = hard max
+    Capacity tiers (see module constants):
+      - SOFT_CAP (35) = soft cap (FIFO target — move to next week once hit)
+      - RED_START (40) = red zone start (emergency / expedited only)
+      - HARD_MAX (50) = hard max
 
     Returns (monday_date_str, week_label, reason) or (None, None, reason).
     """
-    cap = 45 if is_expedited else 30
+    cap = HARD_MAX if is_expedited else SOFT_CAP
 
     available = []
     for wk in schedule:
@@ -175,12 +181,12 @@ def print_schedule(schedule: list) -> None:
     print("-" * 60)
     for wk in schedule:
         total = wk["total"]
-        if total >= 45:
-            status = "FULL (45)"
-        elif total >= 40:
+        if total >= HARD_MAX:
+            status = f"FULL ({HARD_MAX})"
+        elif total >= RED_START:
             status = "RED — emergency only"
-        elif total >= 30:
+        elif total >= SOFT_CAP:
             status = "YELLOW — at soft cap"
         else:
-            status = f"{30 - total:.0f} slots to cap"
-        print(f"{wk['week']:<30s} {total:>10.1f}/45   {status}")
+            status = f"{SOFT_CAP - total:.0f} slots to cap"
+        print(f"{wk['week']:<30s} {total:>10.1f}/{HARD_MAX}   {status}")

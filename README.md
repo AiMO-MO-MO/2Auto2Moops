@@ -109,6 +109,9 @@ code or docs.
 
 ## Rules of the road
 
+- **The dedupe board (`dedupe_board.html`) is a static file, not a Cowork artifact.** The SF step's
+  job is to write `sf_data.js`; the board reads it on refresh. Never `create_artifact`/`update_artifact`
+  for it — edit the file in place if the layout must change.
 - Fill-only; never auto-submit. PO creation, Stripe merchants, and intro emails are human-confirmed.
 - Don't automate login/auth flows.
 - Keep decision logic out of the page-interaction layer (NetSuite migration is planned).

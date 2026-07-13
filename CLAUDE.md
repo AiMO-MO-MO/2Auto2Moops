@@ -256,9 +256,24 @@ final-touch (portal checks untested), EFS kit expansion, persistent console (bar
 **Intake — BUILT (read-only).** `python run.py intake`. Scrapes **Submitted/In Review** only,
 **System-only filter** (one-line revert in `intake.run`), per-SOR detail, batch-FIFO **scheduling**
 (VAC weight from the SOR), and **Admin dedup** with a sleek board badge. Honors the SOR's **Existing
-End Customer** field as the authoritative verdict. Writes `intake_board.html` + `intake_plan.json`.
+End Customer** field as the authoritative verdict. Writes the board data files `dedupe_data.js` +
+`dedupe_keys.json` (read by the static `dedupe_board.html`) plus `intake_plan.json`.
 `inspect <sor>` dumps a SOR page. NOT yet: rules engine, query-tool address signal, SF dedup, the
 resolution-gate → execution handoff (plan isn't consumed by the run yet).
+
+> ### The dedupe board is a STATIC FILE — NOT a Cowork artifact
+> `dedupe_board.html` is a plain HTML file in this repo. It reads two sibling data files:
+> `dedupe_data.js` (written locally by `python run.py intake`) and `sf_data.js` (written by the
+> **SF step** — a chat that has the Salesforce connector). The workflow is:
+> 1. Matt runs `python run.py intake` in the terminal → writes `dedupe_data.js` + `dedupe_keys.json`.
+> 2. A chat with the SF connector reads the keys in `dedupe_keys.json`, queries Salesforce, and
+>    **writes `sf_data.js`** — that is the SF step's *entire* deliverable (a file in the repo).
+> 3. Matt refreshes `dedupe_board.html` in the browser; it now shows both.
+>
+> **NEVER create or update a Cowork artifact** (e.g. "sor-dedupe-review") for this board. An artifact
+> is a throwaway copy in the chat UI — writing to it does NOTHING to the real file and is the wrong
+> action. If the board layout itself needs to change, edit `dedupe_board.html` in place with the file
+> tools. The SF step writes `sf_data.js` and stops.
 
 **Dedup — Admin Stage 1 BUILT.** `core/dedup.py` `match_customer(order, customers)` — source-agnostic,
 priority **email > phone > last-name > laundromat-name** (NOTE: address — the query-tool signal — and
