@@ -2,6 +2,9 @@
 # cookies). NEVER commit this. ──────────────────────────────────────────────────────────
 chrome_profile/
 
+# Slack incoming-webhook URL (secret, post-only) -- local fallback file. NEVER commit.
+slack_webhook.txt
+
 # Downloaded per-order customer config files (.cfg) -- customer data, regenerated per run
 vac_configs/
 
@@ -9,6 +12,8 @@ vac_configs/
 run.log
 # append-only per-run audit trail; grows locally, persisted via OneDrive
 action_log.jsonl
+# reader-kit assessment log written by intake (per-run output)
+reader_kit_assessments.jsonl
 _efs_snippet.js
 intake_board.html
 intake_plan.json
@@ -37,8 +42,10 @@ SF_*.xlsx
 SF_*.csv
 Shipped_Orders_*.xlsx
 
-# Generated dedupe-board data (regenerated per run; dedupe_board.html is tracked -- `git rm --cached` it
-# to stop tracking when the intake work moves to its own branch)
+# Generated dedupe-board DATA -- regenerated per run, contains live customer PII
+# (emails / phones / addresses). NEVER commit. The board SHELL (dedupe_board.html) and
+# DEDUPE_RUNBOOK.md ARE tracked and shipped; the coworker generates the data locally.
 dedupe_data.js
 dedupe_keys.json
-dedupe_board.html
+dedupe_results.json
+dedupe_scope.json

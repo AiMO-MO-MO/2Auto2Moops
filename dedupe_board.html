@@ -1,32 +1,207 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Dedupe board</title><style>
-body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#2C2C2A;background:#F1EFE8;margin:0;padding:24px}
-.wrap{max-width:1040px;margin:0 auto}h1{font-size:22px;font-weight:500;margin:0 0 2px}
-.sub{color:#5F5E5A;font-size:13px;margin-bottom:18px}
-.card{background:#fff;border:.5px solid #D3D1C7;border-radius:12px;padding:14px 16px;margin-bottom:12px}
-.hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}
-.cust{font-weight:600;font-size:15px}.loc{color:#5F5E5A;font-size:13px}
-.links{margin-left:auto}.links a{color:#185FA5;text-decoration:none;font-size:12px;font-family:ui-monospace,Menlo,monospace}
-.oi{font-size:12.5px;color:#5F5E5A;margin-bottom:10px}.oi-l{font-weight:600;color:#2C2C2A}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:740px){.cols{grid-template-columns:1fr}}
-.sys{border:.5px solid #D3D1C7;border-radius:9px;padding:9px 11px;background:#FAFAF7}
-.sys-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
-.sys-name{font-size:11.5px;font-weight:600;text-transform:uppercase;color:#5F5E5A}
-.m{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;padding:5px 0;border-top:.5px solid #D3D1C7;font-size:12px}
-.m:first-of-type{border-top:0}
-.st{font-size:10px;font-weight:700;text-transform:uppercase;padding:1px 6px;border-radius:6px}
-.st-strong{background:#2F6F4E1a;color:#2F6F4E}.st-weak{background:#BA75171a;color:#BA7517}
-.mid,.lw{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#5F5E5A}.lw-none{font-style:italic}
-.obj{font-size:9.5px;font-weight:600;text-transform:uppercase;color:#185FA5;background:#185FA51a;padding:1px 5px;border-radius:6px}
-.note{font-style:italic;color:#BA7517}.mn,.mn-link{font-weight:600}.mn-link{color:#185FA5;text-decoration:none}
-.mo{color:#5F5E5A}.mc{flex-basis:100%;color:#5F5E5A;font-size:11px}
-.empty{color:#5F5E5A;font-size:12px;font-style:italic;padding:3px 0}
-.flag{margin-top:10px;padding:7px 10px;border-radius:8px;font-size:12.5px;font-weight:600}
-.verdict{margin-top:10px;padding-top:9px;border-top:.5px solid #D3D1C7;font-size:12.5px}
-.vb{font-weight:700;font-size:11px;text-transform:uppercase;padding:2px 8px;border-radius:7px;margin-right:8px}
-.why{color:#5F5E5A}
-</style></head><body><div class="wrap">
-<h1>Dedupe board — Admin Portal + Salesforce (live)</h1>
-<div class="sub">7 system orders &middot; all signals &middot; 🚩 red flag = Cents Location ID present</div>
-<div class="card"><div class="hd"><span class="cust">New System — 965 Laundromat</span><span class="loc">965 Amsterdam Ave, New York NY</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27871">SOR-27871</a></span></div><div class="oi"><span class="oi-l">This order</span> Igor/Eric Shamalov · nyadm07@gmail.com · 718-640-5775</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="mid">00204</span><span class="mn">Happy Laundromat</span><span class="mo">nyadm07@gmail.com</span><span class="mc">Eric Shamalov · 718-640-5775</span></div><div class="m"><span class="st st-weak">weak</span><span class="mid">00652</span><span class="mn">128W Laundromat</span><span class="mo">128w</span><span class="mc">Roman Kaykov · 718-344-1977</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000RE9GUAA1/view" class="mn-link">Wash and Chill</a><span class="lw">cust 00652</span><span class="mo">custid</span><span class="mc"><span class="note">End Customer 00652; new loc 965 Amsterdam NOT yet in SF</span></span></div><div class="m"><span class="st st-strong">strong</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000hdObIAAU/view" class="mn-link">Happy Laundries</a><span class="lw">cust 00204</span><span class="mo">phone+email</span><span class="mc"><span class="note">contact Shamalov belongs HERE — different customer than End Customer</span></span></div></div></div><div class="flag" style="background:#BA751714;color:#BA7517">⚠ WHICH CUSTOMER? End Customer = 128W Laundromat (00652 / SF &#x27;Wash and Chill&#x27;) but contact Shamalov belongs to Happy Laundromat (00204). New location 965 Amsterdam not in SF — confirm the parent customer before creating.</div><div class="verdict"><span class="vb" style="background:#BA75171a;color:#BA7517">EXISTING — ⚠ WHICH CUSTOMER</span> <span class="why">Both 00652 (named on SOR) and 00204 (contact&#x27;s account) are existing customers. Multi-store owner. No Cents Location ID on the new site, but pick the right parent first.</span></div></div><div class="card"><div class="hd"><span class="cust">HAMILTON ENTERPRISES LLC</span><span class="loc">1638 Nottingham Way, Trenton NJ</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27872">SOR-27872</a></span></div><div class="oi"><span class="oi-l">This order</span> (existing End Customer: Wash&#x27;n Up 00720)</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="mid">00720</span><span class="mn">Wash&#x27;n Up</span><span class="mo">named on SOR (End Customer)</span><span class="mc">cust 00720 — name-token search missed (&#x27;wash&#x27; is a stopword)</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/001S6000007pUkZIAU/view" class="mn-link">Wash&#x27;n Up</a><span class="lw">cust 00720</span><span class="mo">custid</span><span class="mc"><span class="note">End Customer 00720; new loc 1638 Nottingham NOT yet in SF</span></span></div></div></div><div class="flag" style="background:#2F6F4E14;color:#2F6F4E">✓ EASY — existing customer Wash&#x27;n Up (00720) adding a location. No Cents Location ID conflict.</div><div class="verdict"><span class="vb" style="background:#2F6F4E1a;color:#2F6F4E">EXISTING — both (easy)</span> <span class="why">CUSTID 00720 confirmed in both systems. New location, no live-Cents conflict.</span></div></div><div class="card"><div class="hd"><span class="cust">ESD replacement order — Bubble Blast</span><span class="loc">17445 US-192, Clermont FL</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/26542">SOR-26542</a></span></div><div class="oi"><span class="oi-l">This order</span> Inigo Sanchez · inigosangon@gmail.com · 213-793-1347</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#BA75171a;color:#BA7517">Possible</span></div><div class="m"><span class="st st-weak">weak</span><span class="mid">—</span><span class="mn">(no email/phone match)</span><span class="mo">6 &#x27;Sanchez&#x27; decoys — none match Inigo</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000QPoSoAAL/view" class="mn-link">Laundromart of Four Corners, LLC</a><span class="lw lw-none">no LW link</span><span class="mo">address+owner</span><span class="mc"><span class="note">Cents Location ID 513 (live); LW null = not provisioned</span></span></div></div></div><div class="flag" style="background:#A32D2D14;color:#A32D2D">🚩 HARD TO COMBINE — Cents Location ID 513 (live Cents POS identity). Manual reconciliation.</div><div class="verdict"><span class="vb" style="background:#A32D2D1a;color:#A32D2D">EXISTING — 🚩 FLAG</span> <span class="why">In SF on a live-Cents location; not in Laundroworks. Don&#x27;t auto-create/link.</span></div></div><div class="card"><div class="hd"><span class="cust">Jaafar — Rio Grande 2</span><span class="loc">5885 S Archer Ave, Chicago IL</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27863">SOR-27863</a></span></div><div class="oi"><span class="oi-l">This order</span> Jaafar Alamili · joe.sons1090@gmail.com · 773-971-5633</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="mid">00608</span><span class="mn">Lavanderia Rio Grande</span><span class="mo">card brand</span><span class="mc">Sam Khalaf · 708-785-7800 · dealer Midwest</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#2F6F4E1a;color:#2F6F4E">Existing</span></div><div class="m"><span class="st st-strong">strong</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/0015f00000QPrfpAAD/view" class="mn-link">South Side Laundries</a><span class="lw lw-none">no LW link</span><span class="mo">address</span><span class="mc"><span class="note">Prospect, no Cents Location ID; not cross-linked to Admin 00608</span></span></div></div></div><div class="flag" style="background:#2F6F4E14;color:#2F6F4E">✓ EASY — SF Prospect, no Cents Location ID. Convertible (location #2).</div><div class="verdict"><span class="vb" style="background:#2F6F4E1a;color:#2F6F4E">EXISTING — both (easy)</span> <span class="why">Admin 00608 by name + SF by address, under different names; existing customer adding a location.</span></div></div><div class="card"><div class="hd"><span class="cust">Laundry System</span><span class="loc">Laundry Palace — 398 N 4th St, Sunbury PA</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27302">SOR-27302</a></span></div><div class="oi"><span class="oi-l">This order</span> Billy · directlaundry2@aol.com · 917-678-2095</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#BA75171a;color:#BA7517">Possible</span></div><div class="m"><span class="st st-weak">weak</span><span class="mid">00475/00483/01045 +3</span><span class="mn">Laundry/Palace decoys</span><span class="mo">all NY · no contact match</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#5F5E5A1a;color:#5F5E5A">New</span></div><div class="m"><span class="st st-weak">weak</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/001S6000007pUejIAE/view" class="mn-link">Laundry Palace</a><span class="lw">cust 00483</span><span class="mo">name</span><span class="mc"><span class="note">NY decoy; order is Sunbury PA</span></span></div></div></div><div class="verdict"><span class="vb" style="background:#5F5E5A1a;color:#5F5E5A">NEW</span> <span class="why">Only &#x27;Palace&#x27; name decoys, all NY; no email/phone/address match to the Sunbury PA order.</span></div></div><div class="card"><div class="hd"><span class="cust">PW Wash Barn</span><span class="loc">Excelsior Springs MO</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27755">SOR-27755</a></span></div><div class="oi"><span class="oi-l">This order</span> Dakota Roberts · dakotaroberts12@yahoo.com · 417-298-4112</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#BA75171a;color:#BA7517">Possible</span></div><div class="m"><span class="st st-weak">weak</span><span class="mid">—</span><span class="mn">(no email/phone match)</span><span class="mo">5 &#x27;Roberts&#x27; decoys</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#5F5E5A1a;color:#5F5E5A">New</span></div><div class="empty">no match</div></div></div><div class="verdict"><span class="vb" style="background:#5F5E5A1a;color:#5F5E5A">NEW</span> <span class="why">No contact/name/address match in either system.</span></div></div><div class="card"><div class="hd"><span class="cust">BAM BAM&#x27;S LAUNDRY</span><span class="loc">Martin Storage — 331 Mims Rd, Sylvania GA</span><span class="links"><a href="https://moops.mitechisys.com/order-requests/27723">SOR-27723</a></span></div><div class="oi"><span class="oi-l">This order</span> Chris Martin · martinstorageunits@gmail.com · 912-977-1240</div><div class="cols"><div class="sys"><div class="sys-hd"><span class="sys-name">Admin Portal (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#BA75171a;color:#BA7517">Possible</span></div><div class="m"><span class="st st-weak">weak</span><span class="mid">00977 +3</span><span class="mn">Bam&#x27;s Laundry (AL) · Martin decoys</span><span class="mo">AL + surname noise</span></div></div><div class="sys"><div class="sys-hd"><span class="sys-name">Salesforce (live)</span><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:#5F5E5A1a;color:#5F5E5A">New</span></div><div class="m"><span class="st st-weak">weak</span><span class="obj">Account</span><a href="https://trycentssf.lightning.force.com/lightning/r/Account/0015f00001Gn43VAAR/view" class="mn-link">BAM’S Coin Laundry</a><span class="lw">cust 00977</span><span class="mo">name</span><span class="mc"><span class="note">Pell City AL; order is GA</span></span></div></div></div><div class="verdict"><span class="vb" style="background:#5F5E5A1a;color:#5F5E5A">NEW</span> <span class="why">Alabama &#x27;Bam&#x27;s&#x27; decoy + &#x27;Martin&#x27; surname noise; GA store, no contact/address match.</span></div></div>
-</div></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOR Dedupe Board</title>
+<!--
+  STATIC SHELL — a plain HTML FILE in the repo, built once, never regenerated per run.
+  THIS IS NOT A COWORK ARTIFACT. Do not create/update a Cowork artifact from it — that edits a
+  throwaway copy and does nothing to this file. To change the board, edit this file in place; to
+  refresh the data, re-run intake (dedupe_data.js) and the SF step (sf_data.js), then reload.
+  It renders from two sibling files, each rewritten by a run (this HTML is not):
+    dedupe_data.js -> window.DEDUPE_DATA  { generated_at, orders:[ {
+        sor_no, sor_id, sor_url, classification, dealer, location_name, location_address,
+        contact_name, contact_email, contact_phone, is_expedited, reader_kit_status,
+        admin:{ verdict:'existing|potential|new', matches:[ {cust_id,name,strength,matched_on,
+                 contact_name,contact_email,contact_phone,note} ] } } ] }
+        -> written locally by run.py (queue + live Admin/LW dedupe). No Claude usage.
+    sf_data.js -> window.SF_DATA  { "<sor_no>": { matches:[ {account,url,cust_id,lw_customer,
+                 matched_on,note,cents_location_id} ] } }
+        -> written by the SF step (one batched Salesforce query). The only per-run Claude cost.
+  Reload the page after a run to see fresh results.
+-->
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family:-apple-system,"Segoe UI",Roboto,sans-serif; color:#2C2C2A; background:#F1EFE8; margin:0; padding:24px; font-size:14px; }
+  .wrap { max-width:1040px; margin:0 auto; }
+  h1 { font-size:22px; font-weight:500; margin:0 0 2px; }
+  .sub { color:#5F5E5A; font-size:13px; margin-bottom:18px; font-variant-numeric:tabular-nums; }
+  .card { background:#fff; border:.5px solid #D3D1C7; border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+  .hd { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+  .cust { font-weight:600; font-size:15px; }
+  .loc { color:#5F5E5A; font-size:13px; }
+  .exp { font-size:11px; font-weight:700; color:#BA7517; }
+  .links { margin-left:auto; }
+  .links a { color:#185FA5; text-decoration:none; font-size:12px; font-family:ui-monospace,Menlo,monospace; }
+  .oi { font-size:12.5px; color:#5F5E5A; margin-bottom:10px; }
+  .oi-l { font-weight:600; color:#2C2C2A; }
+  .oi-none { font-style:italic; color:#A32D2D; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media(max-width:740px){ .cols{ grid-template-columns:1fr; } }
+  .sys { border:.5px solid #D3D1C7; border-radius:9px; padding:9px 11px; background:#FAFAF7; }
+  .sys-hd { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
+  .sys-name { font-size:11.5px; font-weight:600; text-transform:uppercase; color:#5F5E5A; }
+  .vb { font-size:11px; font-weight:600; padding:2px 8px; border-radius:7px; }
+  .v-existing { background:#2F6F4E1a; color:#2F6F4E; }
+  .v-potential { background:#BA75171a; color:#BA7517; }
+  .v-new { background:#5F5E5A1a; color:#5F5E5A; }
+  .v-pending { background:#EEEDE8; color:#77756E; }
+  .m { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; padding:5px 0; border-top:.5px solid #D3D1C7; font-size:12px; }
+  .m:first-of-type { border-top:0; }
+  .st { font-size:10px; font-weight:700; text-transform:uppercase; padding:1px 6px; border-radius:6px; }
+  .st-strong { background:#2F6F4E1a; color:#2F6F4E; } .st-weak { background:#BA75171a; color:#BA7517; }
+  .obj { font-size:9.5px; font-weight:600; text-transform:uppercase; color:#185FA5; background:#185FA51a; padding:1px 5px; border-radius:6px; }
+  .mid,.lw { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:#5F5E5A; }
+  .lw-none { font-style:italic; }
+  .mn { font-weight:600; } .mn-link { font-weight:600; color:#185FA5; text-decoration:none; }
+  .mo { color:#5F5E5A; }
+  .mc { flex-basis:100%; color:#5F5E5A; font-size:11px; }
+  .note { font-style:italic; color:#BA7517; }
+  .empty { color:#5F5E5A; font-size:12px; font-style:italic; padding:3px 0; }
+  .cents { flex-basis:100%; color:#A32D2D; font-weight:600; font-size:11px; }
+  .err { background:#FBECEC; border:.5px solid #E5C2C2; color:#A32D2D; padding:12px 14px; border-radius:10px; }
+  .kit { margin-top:9px; font-size:12px; }
+  .kit .ok { color:#2F6F4E; font-weight:600; } .kit .miss { color:#A32D2D; font-weight:600; }
+  .kit-ok { color:#2F6F4E; font-weight:600; }
+  .kit-miss { margin-top:10px; background:#FBECEC; border:.5px solid #E5C2C2; border-radius:9px; padding:8px 11px; }
+  .kit-hd { font-weight:700; color:#A32D2D; font-size:12px; margin-bottom:6px; }
+  .krow { display:flex; flex-wrap:wrap; align-items:baseline; gap:7px; padding:4px 0; border-top:.5px solid #EAD3D3; font-size:12px; }
+  .krow:first-of-type { border-top:0; }
+  .kpill { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:1px 6px; border-radius:6px; }
+  .k-strong { background:#2F6F4E1a; color:#2F6F4E; }
+  .k-medium { background:#BA75171a; color:#BA7517; }
+  .k-weak   { background:#B4530022; color:#9A4A00; }
+  .k-none   { background:#A32D2D1a; color:#A32D2D; }
+  .kmodel { font-family:ui-monospace,Menlo,monospace; font-weight:600; color:#2C2C2A; }
+  .karrow { color:#8A8980; }
+  .kkit { font-family:ui-monospace,Menlo,monospace; font-weight:600; color:#185FA5; }
+  .kkit-none { color:#A32D2D; font-style:italic; font-weight:600; }
+  .ksrc { font-size:10px; font-weight:600; text-transform:uppercase; color:#534AB7; background:#534AB71a; padding:1px 5px; border-radius:6px; }
+  .kmeth { font-size:9.5px; font-weight:700; text-transform:uppercase; padding:1px 5px; border-radius:6px; }
+  .kmeth-rgx { color:#2F6F4E; background:#2F6F4E1a; }
+  .kmeth-dec { color:#185FA5; background:#185FA51a; }
+  .knote { flex-basis:100%; color:#8A8980; font-size:11px; font-style:italic; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SOR Dedupe Board</h1>
+  <div class="sub" id="sub">Loading&hellip;</div>
+  <div id="content"></div>
+</div>
+<script src="dedupe_data.js" onerror="window.__noData=true"></script>
+<script src="sf_data.js" onerror="window.__noSF=true"></script>
+<script>
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function verdict(v){
+  const kls = {existing:'v-existing',potential:'v-potential',new:'v-new'}[v]||'v-pending';
+  const lbl = {existing:'Existing',potential:'Possible',new:'New'}[v]||v;
+  return '<span class="vb '+kls+'">'+esc(lbl)+'</span>';
+}
+
+function matchRow(m, isSF){
+  const strg = (m.strength||'').toLowerCase();
+  const nameHtml = m.url
+    ? '<a class="mn-link" href="'+esc(m.url)+'" target="_blank" rel="noopener">'+esc(m.name||m.account||'')+'</a>'
+    : '<span class="mn">'+esc(m.name||m.account||'')+'</span>';
+  const contact = [m.contact_name,m.contact_email,m.contact_phone].filter(Boolean).join(' · ');
+  let h = '<div class="m">';
+  if(strg) h += '<span class="st st-'+(strg==='strong'?'strong':'weak')+'">'+esc(strg)+'</span>';
+  if(isSF) h += '<span class="obj">'+esc(m.object||'Account')+'</span>';
+  if(m.cust_id) h += (isSF?'<span class="lw">cust '+esc(m.cust_id)+'</span>':'<span class="mid">'+esc(m.cust_id)+'</span>');
+  else if(isSF) h += '<span class="lw lw-none">no LW link</span>';
+  h += nameHtml;
+  if(m.matched_on) h += '<span class="mo">'+esc(m.matched_on)+'</span>';
+  if(contact) h += '<span class="mc">'+esc(contact)+'</span>';
+  if(m.note) h += '<span class="mc note">'+esc(m.note)+'</span>';
+  if(m.cents_location_id) h += '<span class="cents">🚩 Cents Location ID '+esc(m.cents_location_id)+' — live Cents identity, reconcile manually</span>';
+  h += '</div>';
+  return h;
+}
+
+function sysBlock(title, v, matches, pending, isSF){
+  let h = '<div class="sys"><div class="sys-hd"><span class="sys-name">'+title+'</span>';
+  h += pending ? '<span class="vb v-pending">not run</span>' : verdict(v);
+  h += '</div>';
+  if(pending){ h += '<div class="empty">run the SF step to populate</div></div>'; return h; }
+  h += (matches&&matches.length) ? matches.map(m=>matchRow(m,isSF)).join('')
+      : '<div class="empty">no match on email, phone, name'+(isSF?'':', or address')+'</div>';
+  h += '</div>';
+  return h;
+}
+
+function kitStrengthPill(s){
+  const kls={strong:'k-strong',medium:'k-medium',weak:'k-weak',none:'k-none'}[s]||'k-none';
+  const lbl={strong:'strong',medium:'medium',weak:'weak',none:'no match'}[s]||s;
+  return '<span class="kpill '+kls+'">'+esc(lbl)+'</span>';
+}
+
+function renderReaderKits(rk){
+  if(!rk) return '';
+  if(!rk.has_missing){
+    return '<div class="kit kit-ok">✓ Reader kits assigned'
+      +(rk.assigned_count?' ('+rk.assigned_count+')':'')+'</div>';
+  }
+  const it = rk.install_type ? ' &middot; '+esc(rk.install_type) : '';
+  const rows=(rk.missing||[]).map(m=>{
+    const prop = m.proposed_kit
+      ? '<span class="kkit">'+esc(m.proposed_kit)+'</span>'
+      : '<span class="kkit kkit-none">no proposal</span>';
+    const meth = m.method==='decoder'
+      ? '<span class="kmeth kmeth-dec">decoded</span>'
+      : (m.method==='regex' ? '<span class="kmeth kmeth-rgx">matched</span>' : '');
+    const src = m.source==='comment' ? '<span class="ksrc">from comment</span>' : '';
+    const qty = m.qty ? '<span class="mo">x'+esc(m.qty)+'</span>' : '';
+    const reason = m.reasoning ? '<span class="knote">'+esc(m.reasoning)+'</span>' : '';
+    const note = m.note ? '<span class="knote">'+esc(m.note)+'</span>' : '';
+    return '<div class="krow">'+kitStrengthPill(m.strength)
+      +'<span class="kmodel">'+esc(m.model)+'</span>'+qty
+      +'<span class="karrow">&rarr;</span>'+prop+meth+src+reason+note+'</div>';
+  }).join('');
+  return '<div class="kit-miss"><div class="kit-hd">&#9888; Missing reader kits ('
+    +(rk.missing||[]).length+')'+it+'</div>'+rows+'</div>';
+}
+
+function render(){
+  const sub=document.getElementById('sub'), content=document.getElementById('content');
+  const data=window.DEDUPE_DATA;
+  if(!data||!data.orders){
+    content.innerHTML='<div class="err">No <code>dedupe_data.js</code> found. Run <code>python run.py intake</code> to generate it.</div>';
+    sub.textContent=''; return;
+  }
+  const sf=window.SF_DATA||{}, orders=data.orders;
+  let ex=0,po=0,nw=0;
+  const cards=orders.map(o=>{
+    const key=o.sor_no||o.sor_id;
+    const admin=o.admin||{verdict:'new',matches:[]};
+    if(admin.verdict==='existing')ex++; else if(admin.verdict==='potential')po++; else nw++;
+    const contact=[o.contact_name,o.contact_email,o.contact_phone].filter(Boolean).join(' · ');
+    const sfEntry=sf[key];
+    const sfV=(sfEntry&&sfEntry.matches&&sfEntry.matches.length)?'existing':'new';
+
+    const kit=renderReaderKits(o.reader_kits);
+
+    return '<div class="card"><div class="hd">'
+      +'<span class="cust">'+esc(o.location_name||o.dealer||key)+'</span>'
+      +(o.location_address?'<span class="loc">'+esc(o.location_address)+'</span>':'')
+      +(o.is_expedited?'<span class="exp">EXPEDITED</span>':'')
+      +'<span class="links">'+(o.sor_url?'<a href="'+esc(o.sor_url)+'">'+esc(key)+'</a>':esc(key))+'</span></div>'
+      +'<div class="oi"><span class="oi-l">This order</span> '
+      +(contact?esc(contact):'<span class="oi-none">no contact on SOR</span>')+'</div>'
+      +'<div class="cols">'
+      +sysBlock('Admin Portal (live)', admin.verdict, admin.matches, false, false)
+      +sysBlock('Salesforce (live)', sfV, sfEntry?sfEntry.matches:[], !sfEntry, true)
+      +'</div>'+kit+'</div>';
+  });
+  const sfN=Object.keys(sf).length;
+  sub.innerHTML=orders.length+' system orders &middot; Admin: '+ex+' existing, '+po+' possible, '+nw+' new'
+    +' &middot; SF: '+(sfN?sfN+' checked':'<b>not run</b>')+' &middot; generated '+esc(data.generated_at||'');
+  content.innerHTML=cards.join('');
+}
+render();
+</script>
+</body>
+</html>

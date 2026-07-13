@@ -5,9 +5,11 @@ Ad-hoc command: scan the MOOPS order-request queue (the "Submitted/In Review"
 section only), read each SOR, and produce an easy-to-scan board of everything
 waiting, with the important info per order type.
 
-READ-ONLY. Never writes to MOOPS. Outputs:
-  - intake_board.html   (opened in your browser -- the thing you actually look at)
+READ-ONLY. Never writes to MOOPS. Outputs (see DEDUPE_RUNBOOK.md):
+  - dedupe_data.js      (queue + live Admin/LW dedupe; read by the static dedupe_board.html)
+  - dedupe_keys.json    (tiny contact-key list the Claude SF step queries Salesforce on)
   - intake_plan.json    (machine-readable, for later Phase 2 execution)
+  - opens dedupe_board.html (the static shell you actually look at; SF fills in after the SF step)
 
 Key facts about the queue page (validated from the live DOM):
   - /order-requests has several sections, each an <h5> heading + a <table>:
@@ -40,6 +42,7 @@ from core.schedule import calculate_order_weight, pick_assembly_week
 from core.moops import read_schedule_capacity
 from core.portal import scrape_admin_customers
 from core import dedup
+from core import reader_kits
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUEUE_URL = f"{MOOPS_BASE}/order-requests"
@@ -461,6 +464,14 @@ def analyze_sor(page, row):
     expedited = bool(row.get("expedited") or detail.get("is_expedited"))
     comments = detail.get("comments", "").strip()
 
+    # Reader kits: read the Card Reader Kits table (page is still on the SOR) and
+    # scrape candidate model tokens from the comments. Batch resolution of the
+    # MISSING ones happens once per run in run() -> reader_kits.resolve_models.
+    reader_table = (reader_kits.extract_reader_table(page)
+                    if classification in ("System", "Route")
+                    else {"install_type": "", "machines": []})
+    comment_models = reader_kits.extract_comment_models(comments)
+
     flags = []
     if expedited:
         flags.append("Expedited")
@@ -520,6 +531,9 @@ def analyze_sor(page, row):
         "vacs": vacs,
         "vac_count": vac_count,
         "reader_count": reader_count,
+        "reader_table": reader_table,
+        "comment_models": comment_models,
+        "reader_kits": None,  # filled by batch resolution in run()
         "weight": weight,
         "assembly_week": "",
         "assembly_week_date": "",
@@ -742,6 +756,63 @@ def build_board_html(orders, generated_at):
 </div></body></html>"""
 
 
+def _emit_board_data(orders, generated_at):
+    """Write the two SMALL data files the static dedupe_board.html reads.
+
+    dedupe_data.js   -- window.DEDUPE_DATA: queue + live Admin/LW dedupe (this file;
+                        produced locally, no Claude usage).
+    dedupe_keys.json -- tiny [{sor_no, email, phone, name}] list the separate SF step
+                        queries Salesforce on (keeps the SF step's input tiny).
+
+    The board HTML is static and is NEVER regenerated here -- a run only rewrites these.
+    """
+    board_orders, keys = [], []
+    for o in orders:
+        if o.get("classification") != "System":
+            continue
+        cc = o.get("customer_check") or {}
+        matches = []
+        for m in cc.get("matches", []):
+            det = m.get("detail", "")
+            sig = m.get("signal", "")
+            matches.append({
+                "cust_id": m.get("cust_id", ""),
+                "name": m.get("name", ""),
+                "strength": m.get("strength", ""),
+                "matched_on": (f"{sig}: {det}" if det else sig),
+                "contact_name": m.get("contact_name", ""),
+                "contact_email": m.get("contact_email", ""),
+                "contact_phone": m.get("contact_phone", ""),
+            })
+        board_orders.append({
+            "sor_no": o.get("sor_no", ""), "sor_id": o.get("sor_id", ""),
+            "sor_url": o.get("sor_url", ""), "classification": o.get("classification", ""),
+            "dealer": o.get("dealer", ""), "location_name": o.get("location_name", ""),
+            "location_address": o.get("location_address", ""),
+            "contact_name": o.get("contact_name", ""), "contact_email": o.get("contact_email", ""),
+            "contact_phone": o.get("contact_phone", ""), "is_expedited": bool(o.get("is_expedited")),
+            "admin": {"verdict": cc.get("verdict", "new"), "matches": matches},
+            "reader_kits": o.get("reader_kits"),
+        })
+        keys.append({
+            "sor_no": o.get("sor_no", ""),
+            # ordered by SF match accuracy (Matt): address > email > contact name > store name
+            "address": o.get("location_address", ""),
+            "email": o.get("contact_email", ""),
+            "contact_name": o.get("contact_name", ""),
+            "store_name": o.get("location_name", ""),
+            "phone": o.get("contact_phone", ""),
+        })
+    with open(os.path.join(REPO_ROOT, "dedupe_data.js"), "w", encoding="utf-8") as f:
+        f.write("window.DEDUPE_DATA = "
+                + json.dumps({"generated_at": generated_at, "orders": board_orders}, indent=2)
+                + ";\n")
+    with open(os.path.join(REPO_ROOT, "dedupe_keys.json"), "w", encoding="utf-8") as f:
+        json.dump(keys, f, indent=2)
+    print(f"  dedupe_data.js: {len(board_orders)} system orders + Admin dedupe")
+    print(f"  dedupe_keys.json: {len(keys)} keys for the SF step")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -810,6 +881,36 @@ def run(page, limit=None):
         except Exception as e:
             print(f"[WARN] scheduling skipped: {e}")
 
+    # Reader-kit resolution -- surface the MISSING kits (unassigned on the SOR's
+    # Card Reader Kits table) plus any machine models dealers hid in the comments,
+    # and propose a KIT-* for each with a confidence. One /reader_lookup fetch for
+    # the whole batch (like the single Admin /customers scrape). Advisory only.
+    # MUST run before dedup: dedup navigates to admintools (different origin) and the
+    # matcher's fetch('/reader_lookup/index') is same-origin off a MOOPS page.
+    rk_orders = [o for o in orders if o["classification"] in ("System", "Route")]
+    if rk_orders:
+        try:
+            print("\n--- Reader kits (missing + comment models) ---")
+            all_models = set()
+            for o in rk_orders:
+                for m in (o.get("reader_table") or {}).get("machines", []):
+                    if not m.get("assigned") and m.get("model"):
+                        all_models.add(m["model"].upper())
+                for cm in o.get("comment_models", []):
+                    all_models.add(cm.upper())
+            resolved = reader_kits.resolve_models(page, all_models) if all_models else {}
+            for o in rk_orders:
+                summ = reader_kits.build_order_summary(o, resolved)
+                if summ["missing"]:
+                    props = ", ".join(
+                        f'{m["model"]}->{m["proposed_kit"] or "?"}[{m["method"]}/{m["strength"]}]'
+                        for m in summ["missing"][:4])
+                    print(f"  {o['sor_no']:<10} {len(summ['missing'])} missing: {props}")
+            # Durable record for later review/training.
+            reader_kits.write_assessment_log(rk_orders, REPO_ROOT)
+        except Exception as e:
+            print(f"[WARN] reader-kit resolution skipped: {e}")
+
     # Customer dedup (Stage 1 -- Admin Portal /customers). System orders only:
     # routes attach to an existing dealer umbrella account, and parts/cards onboard
     # no customer. One /customers scrape for the whole batch; matching is in-memory.
@@ -854,6 +955,7 @@ def run(page, limit=None):
     # schema consistency: non-System orders carry an explicit null
     for o in orders:
         o.setdefault("customer_check", None)
+        o.setdefault("reader_kits", None)
 
     # Oldest on top. Submitted On is date-only (no time), so the queue's own order
     # (newest-first) is the only reliable chronology -- reverse it for oldest-first.
@@ -861,11 +963,11 @@ def run(page, limit=None):
     generated_at = datetime.now().strftime("%a %b %d, %Y %H:%M")
 
     plan_path = os.path.join(REPO_ROOT, "intake_plan.json")
-    board_path = os.path.join(REPO_ROOT, "intake_board.html")
+    board_path = os.path.join(REPO_ROOT, "dedupe_board.html")  # the static shell (built once)
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump({"generated_at": generated_at, "orders": orders}, f, indent=2)
-    with open(board_path, "w", encoding="utf-8") as f:
-        f.write(build_board_html(orders, generated_at))
+    # Static board is NOT regenerated -- just refresh the small data files it reads.
+    _emit_board_data(orders, generated_at)
 
     print("\n" + "=" * 60)
     print(f"  {len(orders)} orders analyzed in {time.time() - t0:.0f}s")

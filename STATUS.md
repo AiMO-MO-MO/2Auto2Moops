@@ -76,9 +76,11 @@ planner, task workflows, tests). Known trouble: locations / cust id bouncing in 
 `python run.py intake`. Scrapes **Submitted/In Review** only, **System-only filter** (one-line
 revert in `intake.run`), per-SOR detail, batch-FIFO **scheduling** (VAC weight from the SOR), and
 **Admin dedup** with a sleek board badge. Honors the SOR's **Existing End Customer** field as the
-authoritative verdict. Writes `intake_board.html` + `intake_plan.json`. `inspect <sor>` dumps a SOR
-page. NOT yet: rules engine, query-tool address signal, SF dedup, the resolution-gate → execution
-handoff (plan isn't consumed by the run yet).
+authoritative verdict. Writes `dedupe_data.js` + `dedupe_keys.json` + `intake_plan.json` and opens the
+static `dedupe_board.html` (Admin/LW live; Salesforce fills in via the Claude SF step — see
+**DEDUPE_RUNBOOK.md** for the coworker workflow). `inspect <sor>` dumps a SOR page. NOT yet: rules
+engine, query-tool address signal, automated SF (SF pull is the one Claude step), the resolution-gate
+→ execution handoff (plan isn't consumed by the run yet).
 
 ## Dedup — Admin Stage 1 BUILT
 
