@@ -32,6 +32,7 @@ from core.efs import (
     map_sor_to_efs_shipping,
     build_efs_js_snippet,
     copy_to_clipboard,
+    to_efs_snippet_products,
 )
 
 
@@ -302,12 +303,10 @@ def run(page, so_id):
         qty = int(p["qty"]) if str(p["qty"]).isdigit() else 0
         if qty <= 0:
             continue
-        # Generic cards under 1000 → EFS as BOX200
-        if pn_upper.startswith("CARD-MD-GEN") and qty < 1000:
-            box_qty = -(-qty // 200)  # ceiling division
-            efs_products.append({"part": "CARD-MD-GEN01-BOX200", "qty": box_qty})
-            print(f"  [EFS]         {pn:25s} qty={qty} -> CARD-MD-GEN01-BOX200 x{box_qty}")
-        elif is_efs_product(pn):
+        # EFS-eligible parts (generic cards included — CARD-MD-GEN01 is in the catalog).
+        # Keep the MOOPS part + card qty here; the card→box translation for the EFS FORM
+        # happens later via to_efs_snippet_products (BOX200 is EFS-only, not a MOOPS code).
+        if is_efs_product(pn):
             efs_products.append({"part": pn, "qty": qty})
             print(f"  [EFS]         {pn:25s} qty={qty}")
         # Kit expansion: kit not in EFS as whole unit, but components are
@@ -418,7 +417,10 @@ def run(page, so_id):
 
     # Step 9: Post-save output by fulfillment path
     if use_efs:
-        js_snippet = build_efs_js_snippet(so_id, shipping, efs_products, efs_ship_via)
+        # EFS FORM lines: generic cards -> boxes of 200 (BOX200 is the EFS SKU).
+        # The MOOPS SO keeps the -DS card part at the card qty (untouched here).
+        efs_form_products = to_efs_snippet_products(efs_products)
+        js_snippet = build_efs_js_snippet(so_id, shipping, efs_form_products, efs_ship_via)
         clipboard_ok = copy_to_clipboard(js_snippet)
 
         print("\n" + "=" * 50)
@@ -431,7 +433,7 @@ def run(page, so_id):
               f"{shipping.get('state', '')} {shipping.get('zip', '')}")
         print(f"  Phone:     {shipping.get('phone', '')}")
         print(f"  Products:")
-        for p in efs_products:
+        for p in efs_form_products:
             print(f"    {p['part']:25s}  qty={p['qty']}")
         if clipboard_ok:
             print(f"\n  >>> JS auto-fill COPIED TO CLIPBOARD <<<")

@@ -187,15 +187,37 @@ def build_saas_message(so_id, cust_id, location_key, sor: dict) -> dict:
     return {"text": text}
 
 
+SAAS_WEBHOOK_FILE = "slack_webhook.txt"  # local fallback (gitignored): paste ONLY the webhook URL
+
+
+def _resolve_saas_webhook():
+    """Webhook URL: env var SLACK_SAAS_WEBHOOK_URL first, else the first non-comment line of a
+    gitignored `slack_webhook.txt` at the repo root (just the URL, one line). '' if neither set.
+    Lets a non-dev configure Slack by dropping a file in the folder -- no shell env vars needed."""
+    url = os.environ.get(SAAS_WEBHOOK_ENV, "").strip()
+    if url:
+        return url
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), SAAS_WEBHOOK_FILE)
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    except Exception:
+        pass
+    return ""
+
+
 def post_saas_handoff(so_id, cust_id, location_key, sor: dict):
     """POST the task-6 handoff to #moops-matt-mark via a Slack incoming webhook.
 
-    URL from env SLACK_SAAS_WEBHOOK_URL (never committed -- post-only, single channel). Returns
-    (ok: bool, info: str). Missing env or a failed POST -> (False, reason) so the chain leaves
-    task 6 To Do instead of crashing. urllib only (no new dependency)."""
-    url = os.environ.get(SAAS_WEBHOOK_ENV, "").strip()
+    URL from env SLACK_SAAS_WEBHOOK_URL, else a gitignored slack_webhook.txt at the repo root
+    (never committed -- post-only, single channel). Returns (ok: bool, info: str). Missing URL or
+    a failed POST -> (False, reason) so the chain leaves task 6 To Do instead of crashing."""
+    url = _resolve_saas_webhook()
     if not url:
-        return False, f"{SAAS_WEBHOOK_ENV} not set"
+        return False, f"no webhook -- set {SAAS_WEBHOOK_ENV} or create {SAAS_WEBHOOK_FILE} at the repo root"
     data = json.dumps(build_saas_message(so_id, cust_id, location_key, sor)).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:

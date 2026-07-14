@@ -1,7 +1,12 @@
 import unittest
 
 from core.dedup import match_customer, normalize_email, normalize_phone
-from core.efs import expand_kit_for_efs, map_sor_to_efs_shipping, route_products_for_efs
+from core.efs import (
+    expand_kit_for_efs,
+    map_sor_to_efs_shipping,
+    route_products_for_efs,
+    to_efs_snippet_products,
+)
 from core.moops import build_tag
 from core.order_plan import audit_hardware_requirements, build_system_rerun_plan
 from playbooks.cards_order import build_cards_tag
@@ -194,6 +199,27 @@ class EfsHelpersTests(unittest.TestCase):
         )
         self.assertEqual(efs, [{"part": "03-01-95", "qty": 1}, {"part": "01-02-23", "qty": 1}])
         self.assertEqual(other, [{"part": "KIT-P630", "qty": 1}])
+
+    def test_generic_cards_route_to_efs_as_base_part(self):
+        # Generic cards (-DS) are EFS-eligible; the MOOPS base part + card qty is kept here.
+        efs, other = route_products_for_efs([{"part": "CARD-MD-GEN01-DS", "qty": 2000}])
+        self.assertEqual(efs, [{"part": "CARD-MD-GEN01", "qty": 2000}])
+        self.assertEqual(other, [])
+
+    def test_efs_snippet_converts_generic_cards_to_boxes(self):
+        # EFS FORM line: cards -> boxes of 200 (ceil). Other parts pass through unchanged.
+        out = to_efs_snippet_products(
+            [{"part": "CARD-MD-GEN01", "qty": 2000}, {"part": "KIT-DEXTER01", "qty": 2}]
+        )
+        self.assertEqual(
+            out,
+            [{"part": "CARD-MD-GEN01-BOX200", "qty": 10}, {"part": "KIT-DEXTER01", "qty": 2}],
+        )
+        # non-multiple of 200 rounds up to whole boxes
+        self.assertEqual(
+            to_efs_snippet_products([{"part": "CARD-MD-GEN01-DS", "qty": 250}]),
+            [{"part": "CARD-MD-GEN01-BOX200", "qty": 2}],
+        )
 
 
 class DedupTests(unittest.TestCase):

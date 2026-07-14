@@ -661,16 +661,25 @@ def _do_cards(page, so_id, cust_id, sor=None, shortname=None, location_id="",
                           "touch; not cloning a new one. (Card tasks left as previously set.)")
                     return "exists"
         # Card-design correspondent: SOR "Who should we correspond with regarding the card design?"
-        # = "Me" -> the dealer rep who submitted the SOR; otherwise the store operator (New Contact).
+        # = "Me" -> dealer rep (submitter); "Someone else" -> leave the template's named contact
+        # (do NOT add the operator); else -> the store operator (New Contact).
         correspondent = (sor.get("card_correspondent", "") or "").strip().lower()
+        someone_else = correspondent.startswith("someone")
         if correspondent.startswith("me") and sor.get("submitted_by_email"):
             c_name = sor.get("submitted_by_name", "") or sor.get("contact_name", "")
             c_email = sor.get("submitted_by_email", "")
             print(f"[CARDS] Correspondent = 'Me' -> card email to submitter {c_name} / {c_email}")
+        elif someone_else:
+            # MOOPS's email template already fills that named person into the Contact lines. Pass NO
+            # contact so the tool doesn't append the operator/customer at the bottom as a wrong
+            # second contact -- leave the template's contact as-is.
+            c_name = c_email = ""
+            print("[CARDS] Correspondent = 'Someone else' -> leaving the template contact "
+                  "(not adding the operator/customer).")
         else:
             c_name = sor.get("contact_name", "")
             c_email = sor.get("contact_email", "")
-        if cust_id and (not c_name or not c_email):
+        if cust_id and (not c_name or not c_email) and not someone_else:
             try:
                 from core.portal import read_admin_contact
                 admin = read_admin_contact(page, cust_id)

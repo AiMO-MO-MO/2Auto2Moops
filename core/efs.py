@@ -29,8 +29,11 @@ EFS_PRODUCTS = {
     # Reader boards (assemblies)
     "ASSY-02-02-02", "ASSY-02-02-08", "ASSY-02-02-09", "ASSY-02-02-10",
     "ASSY-02-02-11", "ASSY-02-02-12", "ASSY-02-03-11", "ASSY-CD-SK-AD1",
-    # Cards
-    "CARD-MD-GEN01-BOX200",
+    # Cards -- MOOPS lists generic cards as individual cards (base part CARD-MD-GEN01).
+    # EFS stocks them in boxes of 200 (CARD-MD-GEN01-BOX200), but that box SKU is EFS-ONLY;
+    # it is NOT a MOOPS code, so it must NOT live in this MOOPS-part catalog. The card->box
+    # translation happens only when building the EFS order form (see to_efs_snippet_products).
+    "CARD-MD-GEN01",
     # Kits
     "KIT-DEXTER01", "KIT-DOORACCESS-02", "KIT-MDBVENDING-01",
     "KIT-MEDECO-01", "KIT-POS-01", "KIT-VENDRITE-01",
@@ -110,6 +113,37 @@ def route_products_for_efs(products: list) -> tuple:
             other.append({"part": p["part"], "qty": qty})
 
     return efs, other
+
+
+# ── Generic-card box translation (MOOPS cards → EFS boxes) ───────────────────
+# MOOPS lists generic cards as individual cards; EFS stocks them in boxes of 200.
+# CARD-MD-GEN01-BOX200 is an EFS-ONLY SKU (no MOOPS code), so this conversion applies
+# ONLY to the EFS order-form line. The MOOPS SO keeps CARD-MD-GEN01(-DS) at the card qty.
+
+CARD_EFS_BOX = {
+    "CARD-MD-GEN01": ("CARD-MD-GEN01-BOX200", 200),
+}
+
+
+def to_efs_snippet_products(efs_products: list) -> list:
+    """
+    Translate MOOPS EFS-eligible lines into EFS ORDER-FORM lines.
+
+    Generic cards (listed as individual cards in MOOPS) become boxes of 200 — the
+    box count is ceil(cards / 200) so whole boxes always cover the order. Everything
+    else passes through unchanged. Does NOT touch the MOOPS SO (the SO keeps the -DS
+    card part at the card quantity; MOOPS has no box code).
+    """
+    out = []
+    for p in efs_products:
+        base = p["part"].upper().replace("-DS", "")
+        if base in CARD_EFS_BOX:
+            box_pn, per_box = CARD_EFS_BOX[base]
+            boxes = -(-int(p["qty"]) // per_box)  # ceil
+            out.append({"part": box_pn, "qty": boxes})
+        else:
+            out.append(p)
+    return out
 
 
 # ── Shipping mapping ─────────────────────────────────────────────────────────
